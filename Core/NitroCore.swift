@@ -1,28 +1,20 @@
-// nitroctl — command-line client for NitroEC.kext
+// nitroctl — command-line client for NitroEC.kext, ANV15-52 branch
 //
-//   nitroctl [status]      decoded sensors, fans, modes, keyboard LED
+//   nitroctl [status]      decoded sensors, fans, GPU load, keyboard bit, power mode as the EC shows it
 //   nitroctl dump          hex dump of EC RAM 0x00..0xFF
 //   nitroctl read <off>    one byte (hex or decimal offset)
 //   nitroctl watch [sec]   status every <sec> seconds (default 1)
+//   nitroctl ecdiff        learns for 5 s what moves by itself, then prints every other EC byte that changes
+//   nitroctl modes         firmware mode fields and the tables behind each mode (no SMI; needs an SSDT-NITRO with RMOD)
 //
-//   sudo nitroctl fan [cpu|gpu|all] auto
-//   sudo nitroctl fan [cpu|gpu|all] max
-//   sudo nitroctl fan [cpu|gpu|all] manual <20-100>   (percent)
-//        (fan commands set PSEE first; add --wmi to set manual duty via firmware WMBH 0x10)
-//   sudo nitroctl psee on|off            gaming-software flag (EC 0x03 bit4)
-//   sudo nitroctl wmbh <op> [b0 b1 ...]  call firmware WMBH (whitelisted opcodes), hex bytes
+//   sudo nitroctl firmware                         every GET at once, with the raw replies (reads only)
+//   sudo nitroctl fan status|auto|max              both fans, firmware SetGamingFanBehavior (WMBH 0x0E), read back with 0x0F
+//   sudo nitroctl mode status|quiet|balance|performance   firmware SetGamingMiscSetting 0x0B (WMBH 0x16), read back with 0x17
+//   sudo nitroctl kb status                        firmware GetGamingKBBacklight (WMBH 0x15), read only
+//   sudo nitroctl battery limit on|off|status      80 % charge limit (firmware WMBE 0x15 / 0x14)
+//   sudo nitroctl wmbh <op> [b0 b1 ...]            call firmware WMBH, hex bytes: only the exact calls listed below pass
 //
-//   sudo nitroctl mode quiet|default|extreme       firmware operating mode (WMBH 0x16 sub 0x0B)
-//   sudo nitroctl battery limit on|off|status       80 % charge limit (firmware WMBE 0x15 / 0x14)
-//   sudo nitroctl led init                         enable the 4-zone keyboard (done before every led command)
-//   sudo nitroctl led restore                      re-send the colours/effect stored in EC (after boot)
-//   sudo nitroctl led zone <1-4|all> <RRGGBB>      static colour per zone (switches to Static)
-//   sudo nitroctl led effect <name> [speed 1-9] [RRGGBB] [dir 1|2]
-//        name: static breathing neon wave shifting zoom meteor twinkling
-//   sudo nitroctl led brightness <0-100>           keeps the current effect
-//   sudo nitroctl led off
-//   sudo nitroctl usb-charge on|off                USB charging while off/asleep (EC 0x08)
-//   sudo nitroctl kb-timeout on|off                keyboard backlight off after 30 s idle (EC 0x06)
+// There is no command that writes an EC byte: this branch has none, and the kext refuses them anyway.
 
 import Foundation
 import IOKit
@@ -63,25 +55,6 @@ final class NitroEC {
         return UInt8(truncatingIfNeeded: output)
     }
 
-    @discardableResult
-    func writeByte(_ offset: Int, _ value: Int) throws -> UInt8 {
-        if Reg.readOnlyModel { throw NitroECError(description: readOnlyMessage) }
-        var input: [UInt64] = [UInt64(offset), UInt64(value)]
-        var output: UInt64 = 0
-        var outputCount: UInt32 = 1
-        let kr = IOConnectCallScalarMethod(connection, UInt32(kNitroECSelWriteByte.rawValue), &input, 2, &output, &outputCount)
-        switch kr {
-        case KERN_SUCCESS:
-            return UInt8(truncatingIfNeeded: output)
-        case kIOReturnNotPrivileged:
-            throw NitroECError(description: "writing needs root: run with sudo")
-        case kIOReturnNotPermitted:
-            throw NitroECError(description: "kext refused 0x\(String(offset, radix: 16)) = 0x\(String(value, radix: 16)) (not whitelisted)")
-        default:
-            throw NitroECError(description: "writeByte(0x\(String(offset, radix: 16))) failed: 0x\(String(UInt32(bitPattern: kr), radix: 16))")
-        }
-    }
-
     func wmbh(_ opcode: UInt8, _ bytes: [UInt8]) throws -> [UInt8] {
         try wmi(kNitroECSelWMBH, "WMBH", opcode, bytes)
     }
@@ -91,7 +64,9 @@ final class NitroEC {
     }
 
     private func wmi(_ selector: NitroECSelector, _ name: String, _ opcode: UInt8, _ bytes: [UInt8]) throws -> [UInt8] {
-        if Reg.readOnlyModel && !isBatteryLimitCall(selector, opcode, bytes) { throw NitroECError(description: readOnlyMessage) }
+        guard isAllowedFirmwareCall(selector, opcode, bytes) else {
+            throw NitroECError(description: "\(name) 0x\(String(opcode, radix: 16)) \(bytes.map { hex($0) }.joined(separator: " ")): not an allowed call on the \(Reg.model)")
+        }
         var input = [UInt8](repeating: 0, count: Int(kNitroECWMBHInSize))
         for (i, b) in bytes.prefix(input.count).enumerated() { input[i] = b }
         var scalar = UInt64(opcode)
@@ -105,9 +80,9 @@ final class NitroEC {
         case kIOReturnNotPrivileged:
             throw NitroECError(description: "\(name) needs root: run with sudo")
         case kIOReturnNotPermitted:
-            throw NitroECError(description: "kext refused \(name) 0x\(String(opcode, radix: 16)) (not whitelisted)")
+            throw NitroECError(description: "kext refused \(name) 0x\(String(opcode, radix: 16)): the loaded NitroEC.kext is from an older branch (not whitelisted there)")
         case kIOReturnUnsupported:
-            throw NitroECError(description: "\(name) 0x\(String(opcode, radix: 16)): the loaded SSDT-NITRO has no WMEX method (the read-only SSDT of branch anv15-52?); see 'NitroEC Battery WMI' in ioreg -c NitroEC")
+            throw NitroECError(description: "\(name) 0x\(String(opcode, radix: 16)): the loaded SSDT-NITRO lacks the method for it (the SSDT of an older branch?); see 'NitroEC Gaming WMI' and 'NitroEC Battery WMI' in ioreg -c NitroEC")
         default:
             throw NitroECError(description: "\(name) 0x\(String(opcode, radix: 16)) failed: 0x\(String(UInt32(bitPattern: kr), radix: 16))")
         }
@@ -122,25 +97,36 @@ final class NitroEC {
         }
         return buffer
     }
+
+    // TUGM, CCOL, IDPF, 0, then the M1..M5 tables. A plain read, no SMI, no root.
+    func modeState() throws -> [UInt8] {
+        var buffer = [UInt8](repeating: 0, count: Int(kNitroECModeStateSize))
+        var size = Int(kNitroECModeStateSize)
+        let kr = IOConnectCallStructMethod(connection, UInt32(kNitroECSelModeState.rawValue), nil, 0, &buffer, &size)
+        guard kr == KERN_SUCCESS, size == Int(kNitroECModeStateSize) else {
+            throw NitroECError(description: "mode fields not readable (0x\(String(UInt32(bitPattern: kr), radix: 16))): they need the NitroEC.kext and SSDT-NITRO of branch anv15-52-control")
+        }
+        return buffer
+    }
+}
+
+// True when the loaded kext and SSDT publish this capability. A plain registry read, no root.
+func nitroECOffers(_ capability: String) -> Bool {
+    let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(kNitroECServiceClass))
+    guard service != 0 else { return false }
+    defer { IOObjectRelease(service) }
+    return IORegistryEntryCreateCFProperty(service, capability as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool == true
 }
 
 // MARK: - ANV15-52 EC map (Acer Nitro V 15, i9-13900H + RTX 5050; DSDT ERAM at 0xFE708500)
 //
-// From an EC dump decoded against this board's DSDT field names: five snapshots (idle on AC, 60 s load, after load, on battery, lid
-// closed). Only the fields below are understood. The fan mode, Nitro mode, keyboard LED, USB charge, keyboard
-// timeout and battery flags of the AN515-57 map are NOT identified on this board, so the EC is read-only on this branch:
-// the kext refuses every EC write and every gaming WMI call (WMBH), and the shared code below refuses them before asking
-// the kext. The one exception is the firmware battery-health WMI for the charge limit (Reg.batteryLimitWMI).
+// From an EC dump decoded against this board's DSDT field names: five snapshots (idle on AC, 60 s load, after load, on battery, lid closed).
+// Only the fields below are understood, and only for reading: the fan, mode, LED and charge bytes of the AN515-57 map do
+// not exist here, and no byte of this EC is ever written. What can change goes through the firmware WMI (see below).
 enum Reg {
     static let model = "ANV15-52"
-    static let readOnlyModel = true
-    // Branch anv15-52-battery: the one firmware call that may pass, the battery-health WMI (\_SB.PC00.WMID.WMBE, GUID
-    // 79772EC5-04B1-4BFD-843C-61E7F77B6CC9, the one Acer's NitroSense uses on Windows for the 80 % charge limit):
-    // 0x14 reads the status with [battery 1, query 1], 0x15 sets it with [battery 1, mask 1 (limit), 0|1]. Same shape
-    // as the kext whitelist (NitroEC.cpp, isWMBEAllowed). Set by hand with nitroctl only: nitrod never applies it.
-    static let batteryLimitWMI = true
     static let cpuTemp: Int = 0x58        // CTMP, °C (50 idle, 97 under load, like Linux acpitz)
-    static let gpuTemp: Int = 0x59        // GTMP, °C (name from the DSDT; which sensor it is was not verified)
+    static let gpuTemp: Int = 0x59        // GTMP, °C (the NVPCF tables of the firmware read it as the GPU's; 0 under macOS with the RTX on)
     static let sysTemp: Int = 0x51        // ETP1, °C (45-62 in the dump; sensor unverified)
     static let extraTemps: [(String, Int)] = [("ETP2", 0x52), ("ETP3", 0x5A), ("ETP4", 0x5B), ("ETP5", 0x5E), ("ETP6", 0x5F)]
     static let cpuFanRPM: Int = 0x5C      // CPUF, 16-bit BIG-endian (1909 idle, 3743 under load)
@@ -149,87 +135,34 @@ enum Reg {
     static let lid: Int = 0x4C            // LIDT bit 6: lid closed
     static let pl1: Int = 0x14            // PL1H:PL1L, tenths of a watt (56 W on AC, 32 W on battery)
     static let pl2: Int = 0x16            // PL2H:PL2L, tenths of a watt (92 W on AC, 36 W on battery)
-    static let kbBacklight: Int = 0x48    // KBBL bit 0
-    static let modeCandidateA: Int = 0x6D // ACTP, 2 in every snapshot: Nitro mode candidate, to confirm with Windows snapshots
-    static let modeCandidateB: Int = 0x70 // BTMD, 1 in every snapshot: same
-    // AN515-57 names kept so the shared code (config, daemon, app) compiles; all point at byte 0x00 (ECTM, the EC
-    // version), which is harmless to read, and nothing is ever written on this branch.
-    static let unknown: Int = 0x00
-    static let battery = unknown, kbTimeout = unknown, usbCharge = unknown
-    static let ledEffect = unknown, ledSpeed = unknown, ledBright = unknown, ledDir = unknown, ledColor = unknown, zoneColors = unknown
-    static let gpuFanMode = unknown, cpuFanMode = unknown, nitroMode = unknown, cpuFanSpeed = unknown, gpuFanSpeed = unknown
-    static let batteryStatus = unknown
+    static let kbBacklight: Int = 0x48    // KBBL bit 0: GOTS in SSDT10 reports it for hotkey event 0x84 (keyboard light). Never seen at 0 yet
+    static let fanTable: Int = 0x54       // FANT, low nibble: _Q30 of the DSDT sets it to TUGM, the mode index
+    // Names for 'nitroctl ecdiff': the fields of the DSDT that are not plain sensors.
+    static let names: [Int: String] = [0x40: "ACDF", 0x41: "APBF", 0x46: "DGDX", 0x48: "KBBL/BTST", 0x4C: "LIDT", 0x4E: "CPUT/GPUT/VGAF",
+                                       0x54: "FANT", 0x61: "HIDL/DPBL/TOHP", 0x69: "KBST", 0x6D: "ACTP", 0xF5: "NPWM", 0xF6: "KHID"]
 }
 func be16(_ ec: [UInt8], _ at: Int) -> Int { Int(ec[at]) << 8 | Int(ec[at + 1]) }
-let readOnlyMessage = "read-only on the \(Reg.model): the fan and mode bytes of this EC are not identified yet (branch anv15-52-battery writes only the battery charge limit, through the firmware WMI)"
-
-// The only call that passes the read-only gate of this branch: see Reg.batteryLimitWMI.
-func isBatteryLimitCall(_ selector: NitroECSelector, _ opcode: UInt8, _ bytes: [UInt8]) -> Bool {
-    guard Reg.batteryLimitWMI, selector.rawValue == kNitroECSelWMBE.rawValue, bytes.count >= 2, bytes[0] == 1, bytes[1] == 1 else { return false }
-    switch opcode {
-    case 0x14: return bytes.count == 2
-    case 0x15: return bytes.count == 3 && bytes[2] <= 1
-    default: return false
-    }
-}
 
 func hex(_ v: UInt8) -> String { String(format: "0x%02X", v) }
 
-func fanMode(_ v: UInt8, cpu: Bool) -> String {
-    switch (cpu, v) {
-    case (_, 0x00): return "Auto (EC default, never set)"
-    case (true, 0x04), (false, 0x10): return "Auto"
-    case (true, 0x08), (false, 0x20): return "Max"
-    case (true, 0x0C), (false, 0x30): return "Manual"
-    default: return "? \(hex(v))"
-    }
-}
-
-func nitroMode(_ v: UInt8) -> String {
-    switch v {
-    case 0x00: return "Quiet"
-    case 0x01: return "Default"
-    case 0x04: return "Extreme"
-    default: return "? \(hex(v))"
-    }
-}
-
-func ledEffect(_ v: UInt8) -> String {
-    switch v {
-    case 0x00: return "Static"
-    case 0x01: return "Breathing"
-    case 0x02: return "Neon"
-    case 0x03: return "Wave"
-    case 0x04: return "Shifting"
-    case 0x05: return "Zoom"
-    case 0x06: return "Meteor"
-    case 0x07: return "Twinkling"
-    default: return "? \(hex(v))"
-    }
-}
-
-func batteryStatus(_ v: UInt8) -> String {
-    switch v {
-    case 0x00: return "Idle"
-    case 0x01: return "Discharging"
-    case 0x02: return "Charging"
-    default: return "? \(hex(v))"
-    }
-}
-
-func rgb(_ ec: [UInt8], _ at: Int) -> String {
-    String(format: "#%02X%02X%02X", ec[at], ec[at + 1], ec[at + 2])
-}
-
 func printStatus(_ ec: [UInt8]) {
     let extras = Reg.extraTemps.map { "\($0.0) \(ec[$0.1])" }.joined(separator: "  ")
+    let gpu = readGPUStats()
+    let gtmp = Int(ec[Reg.gpuTemp])
+    let rtxTemp = gpu.rtxTemp.map { "\($0) °C (SMCNvidiaGPU)" }
+        ?? (gtmp > 0 ? "\(gtmp) °C (EC GTMP)" : "-- (\(gpu.tempNote ?? "no source"); EC GTMP reads 0)")
+    func load(_ v: Int?) -> String { v.map { "\($0) %" } ?? "--" }
+    let fant = ec[Reg.fanTable] & 0x0F
     print("""
-    \(Reg.model) EC (read-only branch; fields from an EC dump)
-    Temperatures   CPU \(ec[Reg.cpuTemp]) °C (CTMP)   GPU? \(ec[Reg.gpuTemp]) °C (GTMP, unverified)   ETP1 \(ec[Reg.sysTemp])   \(extras) °C
+    \(Reg.model) EC (no EC byte is written on this branch; fields from an EC dump)
+    Temperatures   CPU \(ec[Reg.cpuTemp]) °C (CTMP)   ETP1 \(ec[Reg.sysTemp])   \(extras) °C
+    RTX temp       \(rtxTemp)
     Fans           CPU \(be16(ec, Reg.cpuFanRPM)) RPM (0x5C, big-endian)   GPU \(be16(ec, Reg.gpuFanRPM)) RPM (0x6A)
+    GPU load       RTX \(load(gpu.rtxLoad)) (NVAccel)   Iris Xe \(load(gpu.irisLoad)) (IntelAccelerator)
     Power          AC \(ec[Reg.acStatus] & 0x01 == 1 ? "plugged" : "unplugged")   PL1 \(Double(be16(ec, Reg.pl1)) / 10) W   PL2 \(Double(be16(ec, Reg.pl2)) / 10) W
-    Lid            \(ec[Reg.lid] & 0x40 != 0 ? "closed" : "open")   keyboard backlight bit \(ec[Reg.kbBacklight] & 0x01)
-    Mode bytes     ACTP 0x6D = \(hex(ec[Reg.modeCandidateA]))   BTMD 0x70 = \(hex(ec[Reg.modeCandidateB]))   (candidates, meaning unknown: no mode or fan control here)
+    Lid            \(ec[Reg.lid] & 0x40 != 0 ? "closed" : "open")
+    Keyboard       backlight bit KBBL \(ec[Reg.kbBacklight] & 0x01) (EC 0x48 bit 0, unverified; the Fn keys drive the backlight)
+    Power mode     FANT 0x54 = \(fant): \(profileNameFromFANT(fant)) (table of _Q30 in the DSDT, unverified; 'sudo nitroctl mode status' asks the firmware)
     """)
 }
 
@@ -245,174 +178,232 @@ func parseOffset(_ s: String) -> UInt8? {
     s.lowercased().hasPrefix("0x") ? UInt8(s.dropFirst(2), radix: 16) : UInt8(s)
 }
 
-// MARK: - Fan control
-
-enum FanUnit: CaseIterable {
-    case cpu, gpu
-
-    var modeReg: Int { self == .cpu ? Reg.cpuFanMode : Reg.gpuFanMode }
-    var speedReg: Int { self == .cpu ? Reg.cpuFanSpeed : Reg.gpuFanSpeed }
-    var auto: Int { self == .cpu ? 0x04 : 0x10 }
-    var max: Int { self == .cpu ? 0x08 : 0x20 }
-    var manual: Int { self == .cpu ? 0x0C : 0x30 }
-    var wmbhGroup: UInt8 { self == .cpu ? 0x01 : 0x04 }
+// MARK: - Firmware WMI: the only calls that exist on this branch
+//
+// Same list as the kext (NitroEC.cpp, isWMBHAllowed and isWMBEAllowed). IDs and types: the MOF of this firmware, WQAB in
+// SSDT10 of the ACPI tables. Layouts: Linux drivers/platform/x86/acer-wmi.c for fan behaviour and misc settings (it runs
+// the same methods on the ANV15-51 among others, not on this board), Linuwu-Sense for the battery health and the
+// keyboard backlight. All of them go to the firmware SMI, so they stop every CPU for as long as the handler runs: nothing
+// here polls them.
+enum GamingWMI {
+    static let setFanBehavior: UInt8 = 0x0E   // SetGamingFanBehavior
+    static let getFanBehavior: UInt8 = 0x0F   // GetGamingFanBehavior
+    static let getKBBacklight: UInt8 = 0x15   // GetGamingKBBacklight
+    static let setMisc: UInt8 = 0x16          // SetGamingMiscSetting
+    static let getMisc: UInt8 = 0x17          // GetGamingMiscSetting
+    static let fanCPU: UInt8 = 0x01, fanGPU: UInt8 = 0x08
+    static let fanAutoBoth: [UInt8] = [0x09, 0x00, 0x41]  // 0x410009: bitmap CPU|GPU, CPU mode 1 (bits 17:16), GPU mode 1 (bits 23:22)
+    static let fanMaxBoth: [UInt8] = [0x09, 0x00, 0x82]   // 0x820009: same with mode 2, the firmware's "turbo"
+    static let miscSupportedProfiles: UInt8 = 0x0A        // Linux: "unreliable on some models"
+    static let miscPlatformProfile: UInt8 = 0x0B
+    static let batteryGet: UInt8 = 0x14, batterySet: UInt8 = 0x15  // WMBE
 }
 
-func setPSEE(_ ec: NitroEC, _ on: Bool) throws {
-    let current = Int(try ec.readByte(UInt8(Reg.battery)))
-    let wanted = on ? current | 0x10 : current & ~0x10
-    if wanted != current {
-        try ec.writeByte(Reg.battery, wanted)
-    }
-}
-
-let safeTempLimit: UInt8 = 90
-
-// Same order as OpeNitro: duty first, then mode. Duty is a percentage (firmware
-// WMBH 0x10 rejects > 100). PSEE is raised first, as NitroSense's WMBH 0x05 does.
-func setFan(_ ec: NitroEC, _ units: [FanUnit], mode: String, percent: Int?, viaWMI: Bool) throws {
-    if mode == "manual" {
-        guard let percent, (20...100).contains(percent) else {
-            throw NitroECError(description: "manual speed must be 20-100 (%)")
-        }
-        let status = try ec.dump()
-        let hottest = max(status[Reg.cpuTemp], status[Reg.gpuTemp])
-        if hottest >= safeTempLimit && percent < 100 {
-            throw NitroECError(description: "refusing manual \(percent)% at \(hottest) °C (limit \(safeTempLimit) °C); use 'max'")
+func isAllowedFirmwareCall(_ selector: NitroECSelector, _ opcode: UInt8, _ bytes: [UInt8]) -> Bool {
+    if selector.rawValue == kNitroECSelWMBE.rawValue {
+        switch opcode {
+        case GamingWMI.batteryGet: return bytes == [1, 1]
+        case GamingWMI.batterySet: return bytes == [1, 1, 0] || bytes == [1, 1, 1]
+        default: return false
         }
     }
-
-    try setPSEE(ec, true)
-    for unit in units {
-        switch mode {
-        case "auto":
-            try ec.writeByte(unit.modeReg, unit.auto)
-        case "max":
-            try ec.writeByte(unit.modeReg, unit.max)
-        case "manual":
-            if viaWMI {
-                let result = try ec.wmbh(0x10, [unit.wmbhGroup, UInt8(percent!)])
-                guard result.first == 0 else {
-                    throw NitroECError(description: "firmware WMBH 0x10 returned status \(result.first ?? 0xFF)")
-                }
-            } else {
-                try ec.writeByte(unit.speedReg, percent!)
-            }
-            try ec.writeByte(unit.modeReg, unit.manual)
-        default:
-            throw NitroECError(description: "fan mode must be auto, max or manual")
-        }
+    guard selector.rawValue == kNitroECSelWMBH.rawValue else { return false }
+    switch opcode {
+    case GamingWMI.setFanBehavior: return bytes == GamingWMI.fanAutoBoth || bytes == GamingWMI.fanMaxBoth
+    case GamingWMI.getFanBehavior: return bytes == [GamingWMI.fanCPU] || bytes == [GamingWMI.fanGPU]
+    case GamingWMI.getKBBacklight: return bytes == [1]
+    case GamingWMI.setMisc: return bytes.count == 2 && bytes[0] == GamingWMI.miscPlatformProfile && powerModes.values.contains(bytes[1])
+    case GamingWMI.getMisc: return bytes == [GamingWMI.miscPlatformProfile] || bytes == [GamingWMI.miscSupportedProfiles]
+    default: return false
     }
 }
 
-// MARK: - Operating mode (OPMS 0x2C, set through firmware WMBH 0x16 sub 0x0B)
-
-let nitroModes: [String: UInt8] = ["quiet": 0x00, "default": 0x01, "extreme": 0x04]
-
-// The firmware nudges \ODV0 relative to its current value for Quiet (-1) and
-// Extreme (+1) and resets it to \ODV1 for Default, so always pass through Default
-// first to keep repeated calls from drifting.
-func setNitroMode(_ ec: NitroEC, _ name: String) throws {
-    guard let value = nitroModes[name] else {
-        throw NitroECError(description: "mode must be quiet, default or extreme")
-    }
-    try checkWMBH(try ec.wmbh(0x16, [0x0B, 0x01]), "mode default")
-    if value != 0x01 {
-        try checkWMBH(try ec.wmbh(0x16, [0x0B, value]), "mode \(name)")
+// The first byte of a reply is the firmware status; these are the texts of RETS in SSDT10. A handler that ignores the
+// call leaves our input in WMIB, and WMBH returns that: an input never starts with 0, so that shows as a failure too.
+func firmwareStatusText(_ status: UInt8) -> String {
+    switch status {
+    case 0x00: return "success"
+    case 0x01: return "control method not supported"
+    case 0x02: return "incorrect password"
+    case 0x03: return "incorrect parameters"
+    case 0x07: return "password retry count exceeded"
+    case 0x08: return "success, reboot required"
+    case 0xFF: return "the method is missing (WMBX or WMEX fallback)"
+    default: return "unknown status"
     }
 }
 
-// MARK: - Simple EC toggles (values whitelisted in the kext)
-
-// USB charging while the laptop is off/asleep: EC 0x08, 0x0F on / 0x1F off.
-func setUSBCharge(_ ec: NitroEC, _ on: Bool) throws {
-    try ec.writeByte(Reg.usbCharge, on ? 0x0F : 0x1F)
+func checkedFirmware(_ reply: [UInt8], _ what: String, minBytes: Int = 1, statusAt: Int = 0) throws -> [UInt8] {
+    let raw = reply.map { hex($0) }.joined(separator: " ")
+    guard reply.count >= max(minBytes, statusAt + 1) else {
+        throw NitroECError(description: "\(what): short firmware reply (\(raw))")
+    }
+    guard reply[statusAt] == 0 else {
+        throw NitroECError(description: "\(what): firmware status \(hex(reply[statusAt])), \(firmwareStatusText(reply[statusAt])) (reply \(raw))")
+    }
+    return reply
 }
 
-// Keyboard backlight turns off after 30 s idle: EC 0x06, 0x1E on / 0x00 off.
-func setKBTimeout(_ ec: NitroEC, _ on: Bool) throws {
-    try ec.writeByte(Reg.kbTimeout, on ? 0x1E : 0x00)
+// MARK: - Fan behaviour (both fans; Auto or Max only)
+
+func fanBehaviorName(_ mode: Int) -> String {
+    switch mode {
+    case 0: return "not set (0)"
+    case 1: return "Auto"
+    case 2: return "Max"
+    case 3: return "Custom"
+    default: return "? (\(mode))"
+    }
+}
+
+// Reply: status in bits 7:0, CPU mode in bits 9:8, GPU mode in bits 15:14 (Linux acer-wmi, WMID_gaming_get_fan_behavior).
+func readFanBehavior(_ ec: NitroEC, gpu: Bool) throws -> Int {
+    let reply = try checkedFirmware(try ec.wmbh(GamingWMI.getFanBehavior, [gpu ? GamingWMI.fanGPU : GamingWMI.fanCPU]),
+                                    "GetGamingFanBehavior", minBytes: 2)
+    return gpu ? Int(reply[1] >> 6) : Int(reply[1] & 0x03)
+}
+
+func setFanBehavior(_ ec: NitroEC, max: Bool) throws {
+    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanBehavior, max ? GamingWMI.fanMaxBoth : GamingWMI.fanAutoBoth),
+                            "SetGamingFanBehavior")
+}
+
+// MARK: - Power mode (misc setting 0x0B)
+
+// The values of misc setting 0x0B: the set Linux acer-wmi uses is the set of values CCOL takes in _Q30 of this DSDT, and
+// HIDB sets NVWM (NVPCF) only for 0 and 6. On this firmware the order of the tables is M4 turbo, M3 performance, M2 balance,
+// M1 quiet and eco. Only the first three of the app's list may be written.
+let powerModes: [String: UInt8] = ["quiet": 0x00, "balance": 0x01, "performance": 0x04]
+
+func profileName(_ value: UInt8) -> String {
+    switch value {
+    case 0x00: return "Quiet"
+    case 0x01: return "Balance"
+    case 0x04: return "Performance"
+    case 0x05: return "Turbo"
+    case 0x06: return "Eco"
+    default: return "? \(hex(value))"
+    }
+}
+
+// FANT (EC 0x54) as _Q30 of the DSDT sets it: FANT = TUGM, and TUGM selects CCOL 5, 4, 1, 0, 6.
+func profileValueFromFANT(_ fant: UInt8) -> UInt8? {
+    switch fant {
+    case 0: return 0x05
+    case 1: return 0x04
+    case 2: return 0x01
+    case 3: return 0x00
+    case 4: return 0x06
+    default: return nil
+    }
+}
+
+func profileNameFromFANT(_ fant: UInt8) -> String {
+    profileValueFromFANT(fant).map(profileName) ?? "?"
+}
+
+// Reply: status in bits 7:0, value in bits 15:8 (Linux acer-wmi, WMID_gaming_get_misc_setting).
+func readMiscSetting(_ ec: NitroEC, _ index: UInt8) throws -> UInt8 {
+    try checkedFirmware(try ec.wmbh(GamingWMI.getMisc, [index]), "GetGamingMiscSetting \(hex(index))", minBytes: 2)[1]
+}
+
+func setPlatformProfile(_ ec: NitroEC, _ value: UInt8) throws {
+    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setMisc, [GamingWMI.miscPlatformProfile, value]), "SetGamingMiscSetting")
 }
 
 // MARK: - Battery charge limit (firmware battery-health WMI, layout from Linuwu-Sense)
 
-// Returns uFunctionStatus[0] (1 = 80 % limit on) from GetBatteryHealthControlStatus.
+// Returns uFunctionStatus[0] (1 = 80 % limit on) from GetBatteryHealthControlStatus. The MOF of this firmware gives the
+// reply as uFunctionList (1 byte), uReturn (2 bytes), uFunctionStatus (5 bytes): the status is at byte 1, not 0.
 func batteryLimitStatus(_ ec: NitroEC) throws -> (on: Bool, raw: [UInt8]) {
-    let raw = try ec.wmbe(0x14, [0x01, 0x01])
-    guard raw.count >= 4 else {
-        throw NitroECError(description: "unexpected battery-health reply: \(raw.map { hex($0) })")
-    }
+    let raw = try checkedFirmware(try ec.wmbe(GamingWMI.batteryGet, [0x01, 0x01]), "GetBatteryHealthControlStatus", minBytes: 4, statusAt: 1)
     return (raw[3] == 1, raw)
 }
 
 func setBatteryLimit(_ ec: NitroEC, _ on: Bool) throws {
-    let reply = try ec.wmbe(0x15, [0x01, 0x01, on ? 1 : 0])
+    let reply = try ec.wmbe(GamingWMI.batterySet, [0x01, 0x01, on ? 1 : 0])
     guard reply.first == 0 else {
         throw NitroECError(description: "firmware rejected battery limit (\(reply.map { hex($0) }.joined(separator: " ")))")
     }
 }
 
-// MARK: - Keyboard LED (firmware WMBH 0x06 zone colour, 0x14 effect)
+// MARK: - Every GET at once
 
-let ledEffects = ["static", "breathing", "neon", "wave", "shifting", "zoom", "meteor", "twinkling"]
+// What the firmware answers to the GET calls, with the raw replies. Taken only on request: by hand, by a click in the app,
+// after a write, or when re-applying a setting the user chose.
+struct FirmwareReading: Codable, Equatable {
+    var at = Date()
+    var fanCPU: Int?
+    var fanGPU: Int?
+    var profile: Int?
+    var supportedProfiles: Int?
+    var keyboard: [Int]?        // 0x15 reply: gmReturn, mode, speed, brightness, 0, direction, R, G, B... (Linuwu-Sense's layout)
+    var batteryLimit: Bool?
+    var raw: [String: [Int]] = [:]
+    var errors: [String] = []
 
-struct LEDState {
-    var effect: UInt8
-    var speed: UInt8
-    var brightness: UInt8
-    var direction: UInt8
-    var color: (UInt8, UInt8, UInt8)
+    init() {}
 
-    init(effect: UInt8, speed: UInt8, brightness: UInt8, direction: UInt8, color: (UInt8, UInt8, UInt8)) {
-        self.effect = effect
-        self.speed = speed
-        self.brightness = brightness
-        self.direction = direction
-        self.color = color
+    init(_ ec: NitroEC) {
+        var raw: [String: [Int]] = [:]
+        var errors: [String] = []
+        func ask(_ label: String, minBytes: Int, statusAt: Int = 0, _ call: () throws -> [UInt8]) -> [UInt8]? {
+            do {
+                let reply = try call()
+                raw[label] = reply.map(Int.init)
+                return try checkedFirmware(reply, label, minBytes: minBytes, statusAt: statusAt)
+            } catch {
+                errors.append("\(error)")
+                return nil
+            }
+        }
+        if let r = ask("0F 01 fan CPU", minBytes: 2, { try ec.wmbh(GamingWMI.getFanBehavior, [GamingWMI.fanCPU]) }) { fanCPU = Int(r[1] & 0x03) }
+        if let r = ask("0F 08 fan GPU", minBytes: 2, { try ec.wmbh(GamingWMI.getFanBehavior, [GamingWMI.fanGPU]) }) { fanGPU = Int(r[1] >> 6) }
+        if let r = ask("17 0B profile", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscPlatformProfile]) }) { profile = Int(r[1]) }
+        if let r = ask("17 0A supported", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscSupportedProfiles]) }) { supportedProfiles = Int(r[1]) }
+        if let r = ask("15 01 keyboard", minBytes: 1, { try ec.wmbh(GamingWMI.getKBBacklight, [1]) }) { keyboard = r.map(Int.init) }
+        if let r = ask("WMBE 14 battery", minBytes: 4, statusAt: 1, { try ec.wmbe(GamingWMI.batteryGet, [1, 1]) }) { batteryLimit = r[3] == 1 }
+        self.raw = raw
+        self.errors = errors
     }
 
-    init(_ ec: [UInt8]) {
-        effect = ec[Reg.ledEffect]
-        speed = ec[Reg.ledSpeed]
-        brightness = ec[Reg.ledBright]
-        direction = ec[Reg.ledDir]
-        color = (ec[Reg.ledColor], ec[Reg.ledColor + 1], ec[Reg.ledColor + 2])
+    var fanSummary: String {
+        func name(_ v: Int?) -> String { v.map(fanBehaviorName) ?? "not readable" }
+        return fanCPU == fanGPU ? "both \(name(fanCPU))" : "CPU \(name(fanCPU)), GPU \(name(fanGPU))"
     }
 }
 
-func parseRGB(_ s: String) throws -> (UInt8, UInt8, UInt8) {
-    let hexString = s.hasPrefix("#") ? String(s.dropFirst()) : s
-    guard hexString.count == 6, let v = UInt32(hexString, radix: 16) else {
-        throw NitroECError(description: "colour must be RRGGBB, got '\(s)'")
+func printFirmware(_ reading: FirmwareReading) {
+    func text(_ v: Int?, _ name: (Int) -> String) -> String { v.map(name) ?? "not readable" }
+    print("Fan behaviour  CPU \(text(reading.fanCPU, fanBehaviorName))   GPU \(text(reading.fanGPU, fanBehaviorName))")
+    print("Power mode     \(text(reading.profile) { profileName(UInt8(truncatingIfNeeded: $0)) })   (misc setting 0x0B)")
+    print("Supported      \(text(reading.supportedProfiles) { String(format: "0x%02X", $0) })   (misc setting 0x0A, bit n = value n; Linux calls it unreliable on some models)")
+    if let k = reading.keyboard, k.count >= 9 {
+        print("Keyboard       status \(k[0])  mode \(k[1])  speed \(k[2])  brightness \(k[3])  direction \(k[5])  colour \(k[6]) \(k[7]) \(k[8])   (layout from Linuwu-Sense, RGB models)")
+    } else {
+        print("Keyboard       not readable")
     }
-    return (UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF))
-}
-
-func checkWMBH(_ result: [UInt8], _ what: String) throws {
-    guard result.first == 0 else {
-        throw NitroECError(description: "firmware rejected \(what) (status \(result.first.map { hex($0) } ?? "none"))")
+    print("Charge limit   \(reading.batteryLimit.map { $0 ? "on" : "off" } ?? "not readable")")
+    print("Raw replies:")
+    for (label, bytes) in reading.raw.sorted(by: { $0.key < $1.key }) {
+        print("  \(label): \(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))")
     }
+    for error in reading.errors { print("  ! \(error)") }
 }
 
-// AN515-57 only lights its 4-zone keyboard after GetGamingSysInfo (0x05) and
-// SetGamingLED(keyboard, all zones) (0x02), as the JafarAkhondali Linux module does.
-func initLED(_ ec: NitroEC) throws {
-    _ = try ec.wmbh(0x05, [0x00])
-    try checkWMBH(try ec.wmbh(0x02, [0x08, 0, 0, 0, 0, 0x0F]), "keyboard zone enable")
-}
+// MARK: - Firmware mode fields (RMOD: no SMI)
 
-func applyLED(_ ec: NitroEC, _ led: LEDState) throws {
-    // Some Nitro ECs reject speed 0, even for Static (see negihimanshu015/NitroSense-Linux).
-    let speed = led.speed == 0 ? 5 : led.speed
-    // 16-byte layout from facer_rgb.py: byte 3 = 8 for Wave, byte 9 = 1.
-    var bytes = [UInt8](repeating: 0, count: 16)
-    bytes[0] = led.effect
-    bytes[1] = speed
-    bytes[2] = led.brightness
-    bytes[3] = led.effect == 3 ? 8 : 0
-    bytes[4] = led.direction
-    (bytes[5], bytes[6], bytes[7]) = led.color
-    bytes[9] = 1
-    try checkWMBH(try ec.wmbh(0x14, bytes), "LED effect")
+// TUGM, CCOL, IDPF, 0, then ERM4 + 0xA0: seven bytes (N1 M1 T1 P2 DB CT CP) for each of M1, M2, M3, M4 at +0, +8, +16, +24,
+// and DB CT CP of M5 at +0x24. _Q30 of the DSDT takes PL1 from M?M1 if IDPF is 0x55, otherwise from M?N1, and PL2 from M?P2.
+func printModeState(_ state: [UInt8]) {
+    print("Firmware fields, plain read (no SMI): TUGM \(state[0])   CCOL \(state[1])   IDPF \(hex(state[2]))")
+    print("PL1 = \(state[2] == 0x55 ? "M1" : "N1") column, PL2 = P2 column (_Q30 multiplies them by 8 for the 1/8 W registers, so they should read as watts).")
+    print("    N1   M1   T1   P2   DB   CT   CP")
+    let rows = [("M1: CCOL 0 and 6, quiet and eco", 0), ("M2: CCOL 1, balance", 8), ("M3: CCOL 4, performance", 16), ("M4: CCOL 5, turbo", 24)]
+    for (name, base) in rows {
+        let values = (0..<7).map { String(format: "%4d", state[4 + base + $0]) }.joined(separator: " ")
+        print("\(values)   \(name)")
+    }
+    print("M5: DB \(state[4 + 0x24])  CT \(state[4 + 0x25])  CP \(state[4 + 0x26])")
+    print("(the mode names are read from the DSDT, not verified: compare with 'nitroctl status' and with what each mode does)")
 }
-

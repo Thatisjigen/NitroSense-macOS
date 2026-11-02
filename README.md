@@ -1,17 +1,37 @@
-> **Branch `anv15-52-battery` — Acer Nitro V 15 ANV15-52 (i9-13900H, RTX 5050): read-only EC, plus the battery charge limit.**
-> The EC window of this board is at `0xFE708500` (the SSDT of this branch) and its field map differs from the
-> AN515-57's: so far only temperatures (`CTMP` 0x58, `GTMP` 0x59, `ETP1..6`), fan speeds (`CPUF` 0x5C, `GPUF` 0x6A,
-> 16-bit big-endian), AC (0x40 bit 0), lid (0x4C bit 6), power limits (`PL1` 0x14, `PL2` 0x16, tenths of a watt) and the
-> keyboard backlight bit (0x48) are identified, from an EC dump taken under Linux in five states.
-> The fan-mode, Nitro-mode, LED, charge and timeout bytes are not identified, so **the EC is never written**: the SSDT
-> exports no EC write method and no gaming WMI wrapper, `NitroEC.kext` refuses every EC write and every `WMBH` call,
-> `nitroctl`'s other write commands fail with a message and `nitrod` applies nothing (it still serves `status`).
-> **The one thing this branch writes is the 80 % battery charge limit**, through the firmware's battery-health WMI
-> (`WMBE` 0x14 read / 0x15 write, the GUID Acer's NitroSense uses on Windows, which this board's SSDT10 implements like
-> the AN515-57's): `sudo nitroctl battery limit status|on|off`, by hand only; `nitrod` does not re-apply it at start or
-> wake and refuses it over its socket. `nitroctl status`, `dump`, `read`, `watch` and the app's monitoring work. The
-> other writes come back only after the Windows NitroSense snapshots (Quiet/Balance/Extreme) give the mode and fan
-> bytes a meaning. Everything below describes the upstream AN515-57 version.
+> **Branch `anv15-52-control` — Acer Nitro V 15 ANV15-52 (i9-13900H, RTX 5050): no EC byte is ever written; fan behaviour, power
+> mode and battery charge limit go through the firmware's own WMI, with an exact whitelist.**
+> The EC window of this board is at `0xFE708500` and its field map differs from the AN515-57's: only temperatures (`CTMP` 0x58,
+> `ETP1..6`), fan speeds (`CPUF` 0x5C, `GPUF` 0x6A, 16-bit big-endian), AC (0x40 bit 0), lid (0x4C bit 6), power limits (`PL1`
+> 0x14, `PL2` 0x16, tenths of a watt), the keyboard backlight bit (0x48 bit 0) and `FANT` (0x54) are read, from an EC dump taken under Linux.
+>
+> The SSDT has no EC write method (no `WE1B`), and `NitroEC.kext` lets through only these firmware calls, these exact buffers,
+> root only, whatever else is asked:
+>
+> | Call | Firmware method (MOF of this board) | Buffer |
+> | --- | --- | --- |
+> | `WMBH 0x0E` | `SetGamingFanBehavior` | `09 00 41` both Auto, `09 00 82` both Max |
+> | `WMBH 0x0F` | `GetGamingFanBehavior` | `01` CPU, `08` GPU |
+> | `WMBH 0x15` | `GetGamingKBBacklight` | `01` (read only) |
+> | `WMBH 0x16` | `SetGamingMiscSetting` | `0B 00` quiet, `0B 01` balance, `0B 04` performance |
+> | `WMBH 0x17` | `GetGamingMiscSetting` | `0B` profile, `0A` supported profiles |
+> | `WMBE 0x14`, `0x15` | battery health | `01 01`, `01 01 00`, `01 01 01` |
+>
+> The method IDs and types are in this firmware's MOF (`WQAB` in SSDT10) and `WMBH` hands each to the firmware SMI; the bit layouts come
+> from Linux's `acer-wmi` and from Linuwu-Sense **on other Acer models**: what the SMM handler does here cannot be read from ACPI.
+> **None of these writes has ever run on this board**, hence the `UNVERIFIED` tags in the app and the read-back after every write.
+> Manual fan duty, the curve, the failsafe, turbo, eco and `SetGamingKBBacklight` stay out.
+>
+> `nitrod` calls the firmware only when asked: at start and at wake it does nothing at all until the user chose a fan or power
+> setting with this version; after that it re-applies only that choice, reading first and writing only if the firmware moved. When
+> it stops it brings the fans back to Auto if it took them off, and so does the kext's `stop()`. The charge limit stays with
+> `sudo nitroctl battery limit on|off`.
+>
+> The app shows RTX and Iris Xe load from the IORegistry (`NVAccel`, `IntelAccelerator`), no root. The RTX temperature has no real
+> source today (EC `GTMP` reads 0, SMCNvidiaGPU 1.6 does not recognise this NVRM), so it is hidden, and it appears by itself if
+> `kern.nvgputemp` starts reading. This keyboard is single-colour and the Fn keys drive it: the RGB panel is gone, and the new one
+> only reads. `nitroctl status`, `dump`, `read`, `watch`, `ecdiff` and `modes` need no root; `sudo nitroctl firmware` runs every GET.
+> Kext, SSDT and daemon may be of different branches: what is missing shows as unavailable. Everything below describes the upstream
+> AN515-57 version, and so do the `Scripts/*-test.sh`.
 
 # NitroSense for macOS
 
