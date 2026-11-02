@@ -93,7 +93,7 @@ $(APP)/Contents/Info.plist: App/Info.plist
 	cp $< $@
 
 # Release zip: the build/ outputs plus the scripts, laid out so the scripts work as-is.
-VERSION ?= 1.1.0
+VERSION ?= 1.1.1
 REL     := dist/NitroSense-macOS-$(VERSION)
 release: all
 	rm -rf $(REL) $(REL).zip
