@@ -1,5 +1,5 @@
-// App state: polls nitrod over its socket and sends partial config patches.
-// The app never opens the kext itself, so it needs no root.
+// App state: polls nitrod over its socket and asks it for the few firmware calls this board has; reads the GPU load from
+// the IORegistry itself. The app never opens the kext, so it needs no root.
 
 import AppKit
 import Foundation
@@ -8,38 +8,52 @@ import Observation
 import SwiftUI
 
 struct Snapshot: Equatable {
-    var cpuTemp = 0, gpuTemp = 0, sysTemp = 0
+    var cpuTemp = 0, gtmp = 0, sysTemp = 0
     var cpuRPM = 0, gpuRPM = 0
-    var cpuFanMode: UInt8 = 0, gpuFanMode: UInt8 = 0
-    var cpuDuty = 0, gpuDuty = 0
     var acPlugged = false
-    var batteryState = ""
-    var psee = false
+    var keyboardBit = false   // KBBL, EC 0x48 bit 0
+    var fant: UInt8 = 0       // FANT, EC 0x54
 
     init() {}
 
     init(_ ec: [UInt8]) {
         cpuTemp = Int(ec[Reg.cpuTemp])
-        gpuTemp = Int(ec[Reg.gpuTemp])
+        gtmp = Int(ec[Reg.gpuTemp])
         sysTemp = Int(ec[Reg.sysTemp])
         cpuRPM = be16(ec, Reg.cpuFanRPM)   // ANV15-52: big-endian
         gpuRPM = be16(ec, Reg.gpuFanRPM)
-        cpuFanMode = ec[Reg.cpuFanMode]
-        gpuFanMode = ec[Reg.gpuFanMode]
-        cpuDuty = Int(ec[Reg.cpuFanSpeed])
-        gpuDuty = Int(ec[Reg.gpuFanSpeed])
         acPlugged = ec[Reg.acStatus] & 0x01 == 1
-        batteryState = batteryStatus(ec[Reg.batteryStatus])
-        psee = ec[Reg.battery] & 0x10 != 0
+        keyboardBit = ec[Reg.kbBacklight] & 0x01 == 1
+        fant = ec[Reg.fanTable] & 0x0F
     }
 }
 
 struct Sample {
     let date: Date
     let cpuTemp: Int
-    let gpuTemp: Int
+    let gpuTemp: Int?
     let cpuLoad: Int?
     let cpuPower: Double?
+    let rtxLoad: Int?
+    let irisLoad: Int?
+}
+
+// What nitrod says about the firmware controls. Nothing here comes from a guess: until a reading exists, a control shows no
+// selection. An older nitrod sends no "control" key at all.
+struct ControlState: Equatable {
+    var daemonKnowsControls = false
+    var gamingWMI = false
+    var modeState: [UInt8]?
+    var firmware: FirmwareReading?
+
+    var writable: Bool { daemonKnowsControls && gamingWMI }
+
+    // Why the fan and mode controls are greyed out, when they are.
+    var blockedReason: String? {
+        if !daemonKnowsControls { return "needs the nitrod of this build" }
+        if !gamingWMI { return "needs the kext and SSDT of this build, then a reboot" }
+        return nil
+    }
 }
 
 // Whole-machine draw while on battery: Voltage (mV) × Amperage (mA, negative when
@@ -83,22 +97,22 @@ final class CPULoadMeter {
 final class NitroModel {
     var config = NitroConfig()
     var snapshot = Snapshot()
-    var failsafe = false
     var connected = false
     var error: String?
+    var actionMessage: String?   // what the last click answered, kept for a while: the next poll would clear `error`
+    var actionIsWarning = false
     var history: [Sample] = []   // last 5 min
     var cpuLoad: Int?
     var cpuPower: Double?      // CPU package W from nitrod (powermetrics)
     var batteryPower: Double?  // whole machine W while on battery
+    var gpu = GPUStats()
+    var control = ControlState()
     private let loadMeter = CPULoadMeter()
 
     private let queue = DispatchQueue(label: "nitro.socket")
     private var timer: Timer?
-    private var pending: [String: Any] = [:]
-    private var pendingWork: DispatchWorkItem?
-    // Status polls that were queued before a set can carry the old config; ignore
-    // their config for a moment so controls do not flick back.
-    private var holdConfigUntil = Date.distantPast
+    private var wantsTrustedRead = false
+    private var clearAction: DispatchWorkItem?
 
     init(preview: Bool = false) {
         if preview { return }
@@ -108,32 +122,42 @@ final class NitroModel {
         }
     }
 
+    var gpuTemp: Int? { gpu.rtxTemp ?? (snapshot.gtmp > 0 ? snapshot.gtmp : nil) }
+
+    // Both fans in the same state, as the firmware last answered; nil when not read yet or when they differ.
+    var currentFan: String? {
+        guard let cpu = control.firmware?.fanCPU, let gpu = control.firmware?.fanGPU, cpu == gpu else { return nil }
+        return cpu == 1 ? "auto" : cpu == 2 ? "max" : nil
+    }
+
+    // The firmware's answer if there is one, otherwise what the EC shows: FANT is set by _Q30 of the DSDT.
+    var currentProfile: UInt8? {
+        if let value = control.firmware?.profile { return UInt8(truncatingIfNeeded: value) }
+        return profileValueFromFANT(snapshot.fant)
+    }
+
     func refresh() {
-        send(["cmd": "status"])
-    }
-
-    // Debounced: colour pickers and sliders fire many changes; only the last one is sent.
-    func set(_ patch: [String: Any], delay: Double = 0.25) {
-        holdConfigUntil = Date().addingTimeInterval(delay + 1.5)
-        pending = deepMergePatch(pending, patch)
-        pendingWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            let patch = self.pending
-            self.pending = [:]
-            self.send(["cmd": "set", "config": patch])
+        send(["cmd": "status"], isStatus: true)
+        queue.async {
+            let stats = readGPUStats()
+            Task { @MainActor in self.gpu = stats }
         }
-        pendingWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    func reapply() {
-        send(["cmd": "apply"])
-    }
+    func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false) }
 
-    private func send(_ request: [String: Any]) {
+    func setPower(_ mode: String) { send(["cmd": "power", "mode": mode], isStatus: false) }
+
+    func readFirmware() { send(["cmd": "firmware"], isStatus: false) }
+
+    func reapply() { send(["cmd": "apply"], isStatus: false) }
+
+    // A window opens: refresh what the firmware says, but only on a machine where these calls already answered once by hand.
+    // The first read is always a click, or 'sudo nitroctl firmware'. Waits for the next status reply to know.
+    func requestTrustedRead() { wantsTrustedRead = true }
+
+    private func send(_ request: [String: Any], isStatus: Bool) {
         let payload = try? JSONSerialization.data(withJSONObject: request)
-        let isStatus = request["cmd"] as? String == "status"
         queue.async {
             var data: Data?
             var failure: String?
@@ -147,6 +171,15 @@ final class NitroModel {
         }
     }
 
+    private func showAction(_ message: String, warning: Bool) {
+        actionMessage = message
+        actionIsWarning = warning
+        clearAction?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.actionMessage = nil }
+        clearAction = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
+    }
+
     private func apply(replyData: Data?, failure: String?, isStatus: Bool) {
         guard let replyData, let reply = try? JSONSerialization.jsonObject(with: replyData) as? [String: Any] else {
             connected = false
@@ -155,15 +188,22 @@ final class NitroModel {
         }
         connected = true
         if reply["ok"] as? Bool != true {
-            error = reply["error"] as? String ?? "daemon error"
+            let message = reply["error"] as? String ?? "daemon error"
+            if isStatus { error = message } else { showAction(message, warning: false) }
             return
         }
         error = nil
-        failsafe = reply["failsafe"] as? Bool ?? false
-        if pending.isEmpty, !isStatus || Date() > holdConfigUntil, let cfg = reply["config"] as? [String: Any],
-           let data = try? JSONSerialization.data(withJSONObject: cfg),
-           let decoded = try? JSONDecoder().decode(NitroConfig.self, from: data), decoded != config {
+        if let warning = reply["warning"] as? String {
+            showAction(warning, warning: true)
+        } else if !isStatus {
+            actionMessage = nil
+        }
+        if let cfg = reply["config"] as? [String: Any], let decoded = try? NitroConfig().merged(with: cfg), decoded != config {
             config = decoded
+        }
+        applyControl(reply["control"] as? [String: Any])
+        if !isStatus, reply["warning"] == nil, let errors = control.firmware?.errors, !errors.isEmpty {
+            showAction("Firmware: \(errors.joined(separator: "; "))", warning: true)
         }
         if let ec = (reply["ec"] as? [Int])?.map({ UInt8(truncatingIfNeeded: $0) }), ec.count == 256 {
             snapshot = Snapshot(ec)
@@ -171,24 +211,29 @@ final class NitroModel {
                 cpuLoad = loadMeter.sample() ?? cpuLoad
                 cpuPower = reply["cpuPower"] as? Double
                 batteryPower = batteryDischargeWatts()
+                history.append(Sample(date: Date(), cpuTemp: snapshot.cpuTemp, gpuTemp: gpuTemp, cpuLoad: cpuLoad, cpuPower: cpuPower,
+                                      rtxLoad: gpu.rtxLoad, irisLoad: gpu.irisLoad))
+                if history.count > 150 { history.removeFirst(history.count - 150) }
             }
-            history.append(Sample(date: Date(), cpuTemp: snapshot.cpuTemp, gpuTemp: snapshot.gpuTemp,
-                                  cpuLoad: cpuLoad, cpuPower: cpuPower))
-            if history.count > 150 { history.removeFirst(history.count - 150) }
+        }
+        if isStatus, wantsTrustedRead, config.firmwareReadOK, control.writable {
+            wantsTrustedRead = false
+            readFirmware()
         }
     }
-}
 
-private func deepMergePatch(_ a: [String: Any], _ b: [String: Any]) -> [String: Any] {
-    var out = a
-    for (k, v) in b {
-        if let ad = out[k] as? [String: Any], let bd = v as? [String: Any] {
-            out[k] = deepMergePatch(ad, bd)
-        } else {
-            out[k] = v
+    private func applyControl(_ dict: [String: Any]?) {
+        var next = ControlState()
+        if let dict {
+            next.daemonKnowsControls = true
+            next.gamingWMI = dict["gamingWMI"] as? Bool ?? false
+            next.modeState = (dict["modeState"] as? [Int])?.map { UInt8(truncatingIfNeeded: $0) }
+            if let obj = dict["firmware"], let data = try? JSONSerialization.data(withJSONObject: obj) {
+                next.firmware = try? JSONDecoder().decode(FirmwareReading.self, from: data)
+            }
         }
+        if next != control { control = next }
     }
-    return out
 }
 
 // MARK: - Colour helpers

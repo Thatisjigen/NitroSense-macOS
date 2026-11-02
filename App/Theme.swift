@@ -8,6 +8,7 @@ enum NS {
     static let redDark = Color(red: 0.45, green: 0.05, blue: 0.04)
     static let orange = Color(red: 1.0, green: 0.45, blue: 0.16)
     static let yellow = Color(red: 1.0, green: 0.82, blue: 0.25)
+    static let iris = Color(red: 0.36, green: 0.72, blue: 1.0)  // the Iris Xe's line in the GPU graph
     static let bg = Color(white: 0.07)
     static let panel = Color(white: 0.115)
     static let panelBorder = Color(white: 0.24)
@@ -121,6 +122,7 @@ struct HexToggle: View {
 struct HexRadio: View {
     let label: String
     let selected: Bool
+    var enabled = true
     let action: () -> Void
 
     var body: some View {
@@ -136,6 +138,8 @@ struct HexRadio: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
     }
 }
 
@@ -220,6 +224,7 @@ struct NSListItem: View {
     let label: String
     let icon: String
     let selected: Bool
+    var enabled = true
     let action: () -> Void
 
     var body: some View {
@@ -238,6 +243,8 @@ struct NSListItem: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
     }
 }
 
@@ -249,6 +256,7 @@ struct NSDivider: View {
 struct NSButton: View {
     let label: String
     var icon: String?
+    var enabled = true
     let action: () -> Void
 
     var body: some View {
@@ -265,6 +273,24 @@ struct NSButton: View {
             .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color(white: 0.28), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
+}
+
+// Small tag beside a control that has never been verified on this board.
+struct UnverifiedTag: View {
+    var text = "UNVERIFIED"
+    let help: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(NS.yellow)
+            .padding(.horizontal, 5)
+            .frame(height: 14)
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(NS.yellow.opacity(0.55), lineWidth: 1))
+            .help(help)
     }
 }
 
