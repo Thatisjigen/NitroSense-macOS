@@ -38,20 +38,20 @@ $(KEXT)/Contents/Info.plist: Kext/Info.plist
 	cp $< $@
 
 cli: $(BUILD)/nitroctl
-$(BUILD)/nitroctl: CLI/main.swift Core/NitroCore.swift Core/NitroConfig.swift Kext/NitroECShared.h
+$(BUILD)/nitroctl: CLI/main.swift Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift Kext/NitroECShared.h
 	@mkdir -p $(BUILD)
-	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header Kext/NitroECShared.h Core/NitroCore.swift Core/NitroConfig.swift CLI/main.swift -o $@
+	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header Kext/NitroECShared.h Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift CLI/main.swift -o $@
 
 clean:
 	rm -rf $(BUILD)
 
 daemon: $(BUILD)/nitrod
-$(BUILD)/nitrod: Daemon/main.swift Core/NitroCore.swift Core/NitroConfig.swift Kext/NitroECShared.h
+$(BUILD)/nitrod: Daemon/main.swift Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift Kext/NitroECShared.h
 	@mkdir -p $(BUILD)
-	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header Kext/NitroECShared.h Core/NitroCore.swift Core/NitroConfig.swift Daemon/main.swift -o $@
+	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header Kext/NitroECShared.h Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift Daemon/main.swift -o $@
 
 APP     := $(BUILD)/NitroSense.app
-APP_SRC := App/NitroSenseApp.swift App/Model.swift App/Theme.swift App/Views.swift App/Dialogs.swift Core/NitroCore.swift Core/NitroConfig.swift
+APP_SRC := App/NitroSenseApp.swift App/Model.swift App/Theme.swift App/Views.swift App/Dialogs.swift Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift
 
 app: $(APP)/Contents/MacOS/NitroSense $(APP)/Contents/Info.plist $(APP)/Contents/Resources/AppIcon.icns \
 		$(APP)/Contents/Library/LaunchAgents/com.nitrosense.app.agent.plist
