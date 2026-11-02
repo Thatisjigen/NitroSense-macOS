@@ -223,13 +223,16 @@ IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uin
         LOG("refused WMBH 0x%02X: the loaded SSDT-NITRO has no WMBX", opcode);
         return kIOReturnUnsupported;
     }
-    // Set before the call: if Max fails half way the state is unknown, and stop() should still ask for Auto.
-    bool fanWrite = opcode == kWMBHSetFanBehavior;
-    if (fanWrite && in[2] == kFanMaxByte)
-        fanLeftOffAuto = true;
     IOReturn ret = callWMI("WMBX", opcode, in, out, outLength);
-    if (fanWrite && in[2] == kFanAutoByte && ret == kIOReturnSuccess && *outLength > 0 && out[0] == 0)
-        fanLeftOffAuto = false;
+    if (opcode == kWMBHSetFanBehavior) {
+        bool answered = ret == kIOReturnSuccess && *outLength > 0;
+        bool accepted = answered && out[0] == 0;
+        // Max accepted, or no answer at all, so that the state is unknown: stop() will ask for Auto. A refusal changed nothing.
+        if (in[2] == kFanMaxByte && (accepted || !answered))
+            fanLeftOffAuto = true;
+        if (in[2] == kFanAutoByte && accepted)
+            fanLeftOffAuto = false;
+    }
     return ret;
 }
 

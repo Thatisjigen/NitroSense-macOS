@@ -10,7 +10,7 @@ usage: nitroctl [status | dump | read <offset> | watch [seconds] | ecdiff | mode
        sudo nitroctl mode status|quiet|balance|performance
        sudo nitroctl kb status
        sudo nitroctl battery limit on|off|status
-       sudo nitroctl wmbh <op> [hex bytes...]   (only the exact calls of this branch pass)
+       sudo nitroctl wmbh <op> [hex bytes...]   (only the exact GET calls of this branch pass)
        nitroctl daemon [status | apply | firmware | fan auto|max | power quiet|balance|performance] [--json]
 """
 
@@ -33,6 +33,18 @@ func printPowerMode(_ ec: NitroEC, _ label: String) {
     print(line)
 }
 
+// Runs one firmware write and says how it went; true if it failed.
+func attempt(_ what: String, _ write: () throws -> Void) -> Bool {
+    do {
+        try write()
+        print("\(what): firmware status 0")
+        return false
+    } catch {
+        print("\(what) FAILED: \(error)")
+        return true
+    }
+}
+
 func printFans(_ ec: NitroEC, _ label: String) {
     func text(_ gpu: Bool) -> String {
         do {
@@ -49,6 +61,7 @@ func printFans(_ ec: NitroEC, _ label: String) {
 // Learns for 5 s which EC bytes move by themselves, then prints every other byte that changes. Reads only, no root: press a
 // key and see which byte follows it (keyboard light, mode key), or run a mode change in another window.
 func ecDiff(_ ec: NitroEC) throws -> Never {
+    setvbuf(stdout, nil, _IOLBF, 0)  // line by line, also through tee
     print("Learning for 5 s what moves by itself: touch nothing...")
     var last = try ec.dump()
     var noisy = Set<Int>()
@@ -129,10 +142,11 @@ do {
             _ = try readFanBehavior(ec, gpu: false)
             _ = try readFanBehavior(ec, gpu: true)
             printFans(ec, "Before")
-            try setFanBehavior(ec, max: args[1] == "max")
-            print("SetGamingFanBehavior \(args[1]): firmware status 0")
+            // A refusal or an error is still followed by the read-back: the firmware may have moved anyway.
+            let failure = attempt("SetGamingFanBehavior \(args[1])") { try setFanBehavior(ec, max: args[1] == "max") }
             Thread.sleep(forTimeInterval: 0.5)
             printFans(ec, "After ")
+            if failure { exit(1) }
         default:
             fail("fan takes status, auto or max: both fans together. Manual duty and the curve are left out on the \(Reg.model): 'nitroctl watch 1' shows the RPM")
         }
@@ -143,10 +157,10 @@ do {
         } else if let value = powerModes[args[1]] {
             _ = try readMiscSetting(ec, GamingWMI.miscPlatformProfile)  // reads first, as for the fans
             printPowerMode(ec, "Before")
-            try setPlatformProfile(ec, value)
-            print("SetGamingMiscSetting 0x0B \(hex(value)) (\(profileName(value))): firmware status 0")
+            let failure = attempt("SetGamingMiscSetting 0x0B \(hex(value)) (\(profileName(value)))") { try setPlatformProfile(ec, value) }
             Thread.sleep(forTimeInterval: 0.5)
             printPowerMode(ec, "After ")
+            if failure { exit(1) }
         } else {
             fail("mode takes status, quiet, balance or performance")
         }
@@ -161,6 +175,7 @@ do {
     case "battery":
         guard args.count == 3, args[1] == "limit", ["on", "off", "status"].contains(args[2]) else { fail(usage) }
         if args[2] != "status" {
+            _ = try batteryLimitStatus(ec)  // reads first, as for the fans and the mode
             try setBatteryLimit(ec, args[2] == "on")
         }
         let (on, raw) = try batteryLimitStatus(ec)
@@ -168,6 +183,9 @@ do {
         print("80% charge limit: \(on ? "on" : "off")   (WMBE 0x14 reply \(raw.map { hex($0) }.joined(separator: " ")))")
     case "wmbh":
         guard args.count >= 2, let op = parseOffset(args[1]) else { fail(usage) }
+        guard ![GamingWMI.setFanBehavior, GamingWMI.setMisc].contains(op) else {
+            fail("the writes go through 'fan' and 'mode', which read first and read back")
+        }
         let bytes = args.dropFirst(2).compactMap { UInt8($0.lowercased().replacingOccurrences(of: "0x", with: ""), radix: 16) }
         let result = try ec.wmbh(op, bytes)
         print("WMBH \(hex(op)) [\(bytes.map { hex($0) }.joined(separator: " "))] -> \(result.map { hex($0) }.joined(separator: " "))")

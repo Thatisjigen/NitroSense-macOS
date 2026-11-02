@@ -233,13 +233,13 @@ func firmwareStatusText(_ status: UInt8) -> String {
     }
 }
 
-func checkedFirmware(_ reply: [UInt8], _ what: String, minBytes: Int = 1, statusAt: Int = 0) throws -> [UInt8] {
+func checkedFirmware(_ reply: [UInt8], _ what: String, minBytes: Int = 1, statusAt: Int = 0, statusBytes: Int = 1) throws -> [UInt8] {
     let raw = reply.map { hex($0) }.joined(separator: " ")
-    guard reply.count >= max(minBytes, statusAt + 1) else {
+    guard reply.count >= max(minBytes, statusAt + statusBytes) else {
         throw NitroECError(description: "\(what): short firmware reply (\(raw))")
     }
-    guard reply[statusAt] == 0 else {
-        throw NitroECError(description: "\(what): firmware status \(hex(reply[statusAt])), \(firmwareStatusText(reply[statusAt])) (reply \(raw))")
+    if let status = reply[statusAt..<(statusAt + statusBytes)].first(where: { $0 != 0 }) {
+        throw NitroECError(description: "\(what): firmware status \(hex(status)), \(firmwareStatusText(status)) (reply \(raw))")
     }
     return reply
 }
@@ -316,15 +316,13 @@ func setPlatformProfile(_ ec: NitroEC, _ value: UInt8) throws {
 // Returns uFunctionStatus[0] (1 = 80 % limit on) from GetBatteryHealthControlStatus. The MOF of this firmware gives the
 // reply as uFunctionList (1 byte), uReturn (2 bytes), uFunctionStatus (5 bytes): the status is at byte 1, not 0.
 func batteryLimitStatus(_ ec: NitroEC) throws -> (on: Bool, raw: [UInt8]) {
-    let raw = try checkedFirmware(try ec.wmbe(GamingWMI.batteryGet, [0x01, 0x01]), "GetBatteryHealthControlStatus", minBytes: 4, statusAt: 1)
+    let raw = try checkedFirmware(try ec.wmbe(GamingWMI.batteryGet, [0x01, 0x01]), "GetBatteryHealthControlStatus", minBytes: 4, statusAt: 1, statusBytes: 2)
     return (raw[3] == 1, raw)
 }
 
+// The MOF of this firmware: uReturn (2 bytes), uReservedOut (2 bytes).
 func setBatteryLimit(_ ec: NitroEC, _ on: Bool) throws {
-    let reply = try ec.wmbe(GamingWMI.batterySet, [0x01, 0x01, on ? 1 : 0])
-    guard reply.first == 0 else {
-        throw NitroECError(description: "firmware rejected battery limit (\(reply.map { hex($0) }.joined(separator: " ")))")
-    }
+    _ = try checkedFirmware(try ec.wmbe(GamingWMI.batterySet, [0x01, 0x01, on ? 1 : 0]), "SetBatteryHealthControl", statusBytes: 2)
 }
 
 // MARK: - Every GET at once
@@ -347,11 +345,11 @@ struct FirmwareReading: Codable, Equatable {
     init(_ ec: NitroEC) {
         var raw: [String: [Int]] = [:]
         var errors: [String] = []
-        func ask(_ label: String, minBytes: Int, statusAt: Int = 0, _ call: () throws -> [UInt8]) -> [UInt8]? {
+        func ask(_ label: String, minBytes: Int, statusAt: Int = 0, statusBytes: Int = 1, _ call: () throws -> [UInt8]) -> [UInt8]? {
             do {
                 let reply = try call()
                 raw[label] = reply.map(Int.init)
-                return try checkedFirmware(reply, label, minBytes: minBytes, statusAt: statusAt)
+                return try checkedFirmware(reply, label, minBytes: minBytes, statusAt: statusAt, statusBytes: statusBytes)
             } catch {
                 errors.append("\(error)")
                 return nil
@@ -362,7 +360,7 @@ struct FirmwareReading: Codable, Equatable {
         if let r = ask("17 0B profile", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscPlatformProfile]) }) { profile = Int(r[1]) }
         if let r = ask("17 0A supported", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscSupportedProfiles]) }) { supportedProfiles = Int(r[1]) }
         if let r = ask("15 01 keyboard", minBytes: 1, { try ec.wmbh(GamingWMI.getKBBacklight, [1]) }) { keyboard = r.map(Int.init) }
-        if let r = ask("WMBE 14 battery", minBytes: 4, statusAt: 1, { try ec.wmbe(GamingWMI.batteryGet, [1, 1]) }) { batteryLimit = r[3] == 1 }
+        if let r = ask("WMBE 14 battery", minBytes: 4, statusAt: 1, statusBytes: 2, { try ec.wmbe(GamingWMI.batteryGet, [1, 1]) }) { batteryLimit = r[3] == 1 }
         self.raw = raw
         self.errors = errors
     }

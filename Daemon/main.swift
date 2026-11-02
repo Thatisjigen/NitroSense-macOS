@@ -19,7 +19,9 @@ import Foundation
 import IOKit
 import IOKit.pwr_mgt
 
-let minFirmwareReadInterval = 3.0  // every GET is an SMI: a stuck client must not be able to hammer them
+// Every firmware call is an SMI: a stuck client must not be able to hammer them.
+let minFirmwareReadInterval = 3.0
+let minFirmwareCommandInterval = 1.0
 
 func log(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
@@ -84,7 +86,8 @@ final class Daemon {
     var config: NitroConfig
     var firmware: FirmwareReading?
     var lastFirmwareRead = Date.distantPast
-    var fanOffAuto = false              // this daemon took the fans off Auto
+    var lastFirmwareCommand = Date.distantPast
+    var fanOffAuto = false              // the fans are off Auto because of this daemon
     var cpuPower: Double?
     var cpuPowerAt = Date.distantPast
     lazy var powerMeter = PowerMeter { [weak self] watts in
@@ -158,12 +161,11 @@ final class Daemon {
                 let cpu = try readFanBehavior(ec, gpu: false), gpu = try readFanBehavior(ec, gpu: true)
                 // 0 is the firmware's own default before anyone set it: that is Auto too, for a choice of Auto.
                 let alreadyThere = wanted == 1 ? cpu <= 1 && gpu <= 1 : cpu == wanted && gpu == wanted
-                if wanted != 1 { fanOffAuto = true }
                 if !alreadyThere {
                     log("apply (\(reason)): fans CPU \(fanBehaviorName(cpu)), GPU \(fanBehaviorName(gpu)) -> \(fanBehaviorName(wanted))")
                     try setFanBehavior(ec, max: wanted != 1)
                 }
-                if wanted == 1 { fanOffAuto = false }
+                fanOffAuto = wanted != 1
             } catch {
                 log("apply (\(reason)): fans: \(error)")
             }
@@ -204,6 +206,7 @@ final class Daemon {
         case "status":
             return statusReply()
         case "apply":
+            guard commandAllowedNow() else { return tooSoon() }
             applyAll(reason: "client")
             return statusReply()
         case "firmware":
@@ -216,10 +219,10 @@ final class Daemon {
             }
             guard gamingWMI else { return noGamingWMI() }
             guard answered({ $0.fanCPU != nil && $0.fanGPU != nil }) else { return notRead("fan behaviour") }
+            guard commandAllowedNow() else { return tooSoon() }
             do {
-                if mode == "max" { fanOffAuto = true }
                 try setFanBehavior(ec, max: mode == "max")
-                if mode == "auto" { fanOffAuto = false }
+                fanOffAuto = mode == "max"
                 config.userFan = mode
                 save()
                 log("fan: \(mode), asked by a client")
@@ -232,7 +235,7 @@ final class Daemon {
                 return reply
             } catch {
                 log("fan \(mode): \(error)")
-                return ["ok": false, "error": "fan \(mode): \(error)"]
+                return refused("fan \(mode): \(error)")
             }
         case "power":
             guard let mode = request["mode"] as? String, let value = powerModes[mode] else {
@@ -240,6 +243,7 @@ final class Daemon {
             }
             guard gamingWMI else { return noGamingWMI() }
             guard answered({ $0.profile != nil }) else { return notRead("power mode") }
+            guard commandAllowedNow() else { return tooSoon() }
             do {
                 try setPlatformProfile(ec, value)
                 config.userMode = mode
@@ -253,7 +257,7 @@ final class Daemon {
                 return reply
             } catch {
                 log("power \(mode): \(error)")
-                return ["ok": false, "error": "power \(mode): \(error)"]
+                return refused("power \(mode): \(error)")
             }
         case "set":
             // The upstream way of changing settings. An older app may still send it: nothing it asks for exists on this board.
@@ -268,6 +272,25 @@ final class Daemon {
     private func answered(_ check: (FirmwareReading) -> Bool) -> Bool {
         if firmware == nil, config.firmwareReadOK { readFirmware() }
         return firmware.map(check) ?? false
+    }
+
+    private func commandAllowedNow() -> Bool {
+        guard Date().timeIntervalSince(lastFirmwareCommand) >= minFirmwareCommandInterval else { return false }
+        lastFirmwareCommand = Date()
+        return true
+    }
+
+    private func tooSoon() -> [String: Any] {
+        ["ok": false, "error": "too soon after the last firmware command: try again in a second"]
+    }
+
+    // A write that failed is still read back: the firmware may have moved anyway. The choice is not remembered.
+    private func refused(_ message: String) -> [String: Any] {
+        readFirmware()
+        var reply = statusReply()
+        reply["ok"] = false
+        reply["error"] = message
+        return reply
     }
 
     private func notRead(_ what: String) -> [String: Any] {
@@ -376,6 +399,9 @@ daemon.applyAll(reason: "start")
 daemon.powerMeter.start()
 let server = startServer(daemon)
 registerPower(daemon)
+
+// A client that goes away before its reply must not take the daemon with it.
+signal(SIGPIPE, SIG_IGN)
 
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGTERM, SIGINT, SIGHUP] {

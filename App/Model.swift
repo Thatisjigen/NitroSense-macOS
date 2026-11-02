@@ -8,6 +8,7 @@ import Observation
 import SwiftUI
 
 struct Snapshot: Equatable {
+    var fromEC = false        // false until the EC was read: no value below means anything then, 0 least of all
     var cpuTemp = 0, gtmp = 0, sysTemp = 0
     var cpuRPM = 0, gpuRPM = 0
     var acPlugged = false
@@ -17,6 +18,7 @@ struct Snapshot: Equatable {
     init() {}
 
     init(_ ec: [UInt8]) {
+        fromEC = true
         cpuTemp = Int(ec[Reg.cpuTemp])
         gtmp = Int(ec[Reg.gpuTemp])
         sysTemp = Int(ec[Reg.sysTemp])
@@ -41,6 +43,7 @@ struct Sample {
 // What nitrod says about the firmware controls. Nothing here comes from a guess: until a reading exists, a control shows no
 // selection. An older nitrod sends no "control" key at all.
 struct ControlState: Equatable {
+    var daemonGone = false
     var daemonKnowsControls = false
     var gamingWMI = false
     var firmwareReadOK = false
@@ -54,6 +57,7 @@ struct ControlState: Equatable {
 
     // Why a control is greyed out, when it is.
     var readBlockedReason: String? {
+        if daemonGone { return "nitrod is not reachable" }
         if !daemonKnowsControls { return "needs the nitrod of this build" }
         if !gamingWMI { return "needs the kext and SSDT of this build, then a reboot" }
         return nil
@@ -146,7 +150,7 @@ final class NitroModel {
     // The firmware's answer if there is one, otherwise what the EC shows: FANT is set by _Q30 of the DSDT.
     var currentProfile: UInt8? {
         if let value = control.firmware?.profile { return UInt8(truncatingIfNeeded: value) }
-        return profileValueFromFANT(snapshot.fant)
+        return snapshot.fromEC ? profileValueFromFANT(snapshot.fant) : nil
     }
 
     func refresh() {
@@ -197,9 +201,14 @@ final class NitroModel {
         guard let replyData, let reply = try? JSONSerialization.jsonObject(with: replyData) as? [String: Any] else {
             connected = false
             error = failure ?? "no reply from nitrod"
+            // Nothing can be asked of it, and what it said last is no longer known to be true.
+            snapshot = Snapshot()
+            control = ControlState(daemonGone: true)
             return
         }
         connected = true
+        // Also after a refused write: nitrod reads back, and the firmware may have moved anyway.
+        if reply["control"] != nil { applyControl(reply["control"] as? [String: Any]) }
         if reply["ok"] as? Bool != true {
             let message = reply["error"] as? String ?? "daemon error"
             if isStatus { error = message } else { showAction(message, warning: false) }
@@ -214,7 +223,7 @@ final class NitroModel {
         if let cfg = reply["config"] as? [String: Any], let decoded = try? NitroConfig().merged(with: cfg), decoded != config {
             config = decoded
         }
-        applyControl(reply["control"] as? [String: Any])
+        if reply["control"] == nil { applyControl(nil) }
         if !isStatus, reply["warning"] == nil, let errors = control.firmware?.errors, !errors.isEmpty {
             showAction("Firmware: \(errors.joined(separator: "; "))", warning: true)
         }

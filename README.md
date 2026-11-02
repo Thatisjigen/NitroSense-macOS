@@ -18,7 +18,8 @@
 >
 > The method IDs and types are in this firmware's MOF (`WQAB` in SSDT10) and `WMBH` hands each to the firmware SMI; the bit layouts come
 > from Linux's `acer-wmi` and from Linuwu-Sense **on other Acer models**: what the SMM handler does here cannot be read from ACPI.
-> **None of these writes has ever run on this board**, hence the `UNVERIFIED` tags in the app and the read-back after every write.
+> **None of these writes has ever run on this board**, hence the `UNVERIFIED` tags in the app. A write needs its GET to have answered
+> first (nitrod and nitroctl refuse otherwise), and it is read back afterwards, even when it fails.
 > Manual fan duty, the curve, the failsafe, turbo, eco and `SetGamingKBBacklight` stay out.
 >
 > `nitrod` calls the firmware only when asked: at start and at wake it does nothing at all until the user chose a fan or power

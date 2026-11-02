@@ -165,9 +165,9 @@ struct FanControlPanel: View {
 
                 Spacer()
                 HStack(spacing: 22) {
-                    FanSide(name: "CPU", temp: s.cpuTemp, alignment: .trailing)
-                    FanDial(rpm: s.cpuRPM)
-                    FanDial(rpm: s.gpuRPM)
+                    FanSide(name: "CPU", temp: s.fromEC ? s.cpuTemp : nil, alignment: .trailing, tempHelp: "nitrod is not reachable")
+                    FanDial(rpm: s.fromEC ? s.cpuRPM : nil)
+                    FanDial(rpm: s.fromEC ? s.gpuRPM : nil)
                     FanSide(name: "GPU", temp: model.gpuTemp, alignment: .leading, tempHelp: model.gpu.tempNote)
                 }
                 Spacer()
@@ -254,7 +254,10 @@ struct PowerPlanPanel: View {
     }
 
     private var statusLine: String {
-        guard let value = model.currentProfile else { return "Mode unknown (EC FANT \(model.snapshot.fant))" }
+        guard let value = model.currentProfile else {
+            let why = model.snapshot.fromEC ? "EC FANT \(model.snapshot.fant)" : "no EC data"
+            return "Mode unknown (\(why))" + (model.control.modeBlockedReason.map { ". To change it: \($0)." } ?? "")
+        }
         var line: String
         if let firmware = model.control.firmware, firmware.profile != nil {
             line = "\(profileName(value)), firmware at \(firmware.at.formatted(date: .omitted, time: .shortened))"
@@ -310,11 +313,11 @@ struct MonitoringPanel: View {
                 .font(.system(size: 11))
                 MonitorRow(name: "CPU", times: h.map(\.date), temps: h.map(\.cpuTemp), loads: h.map { $0.cpuLoad ?? 0 },
                            powers: h.map { $0.cpuPower ?? -1 },
-                           temp: model.snapshot.cpuTemp, load: model.cpuLoad, power: model.cpuPower)
+                           temp: model.snapshot.fromEC ? model.snapshot.cpuTemp : nil, load: model.cpuLoad, power: model.cpuPower)
                     .help("CPU power = Intel package (cores + iGPU + system agent), from powermetrics")
-                MonitorRow(name: "RTX 5050", times: h.map(\.date), temps: h.map { $0.gpuTemp ?? -1 }, loads: h.map { $0.rtxLoad ?? 0 }, powers: [],
+                MonitorRow(name: "RTX 5050", times: h.map(\.date), temps: h.map { $0.gpuTemp ?? -1 }, loads: h.map { $0.rtxLoad ?? -1 }, powers: [],
                            temp: model.gpuTemp, load: model.gpu.rtxLoad, power: model.gpu.rtxPower,
-                           secondLoads: h.map { $0.irisLoad ?? 0 }, secondLoad: model.gpu.irisLoad)
+                           secondLoads: h.map { $0.irisLoad ?? -1 }, secondLoad: model.gpu.irisLoad)
                     .help("Load read from the IORegistry: RTX 5050 from NVAccel, Iris Xe from IntelAccelerator. "
                           + (model.gpuTemp == nil ? "No temperature shown: \(model.gpu.tempNote ?? "no source")." : ""))
             }
@@ -329,7 +332,7 @@ struct MonitorRow: View {
     let name: String
     let times: [Date]
     let temps: [Int]            // -1 = no sample
-    let loads: [Int]
+    let loads: [Int]            // same
     let powers: [Double]
     let temp: Int?
     let load: Int?
@@ -370,7 +373,8 @@ struct MonitorRow: View {
         let validTemps = temps.filter { $0 >= 0 }
         if !secondLoads.isEmpty {
             if let minT = validTemps.min(), let maxT = validTemps.max() { parts.append("Min : \(minT)°    Max : \(maxT)°") }
-            parts.append("Peak : \(loads.max().map { "\($0) %" } ?? "--")    Iris : \(secondLoads.max().map { "\($0) %" } ?? "--")")
+            func peak(_ values: [Int]) -> String { values.filter { $0 >= 0 }.max().map { "\($0) %" } ?? "--" }
+            parts.append("Peak : \(peak(loads))    Iris : \(peak(secondLoads))")
         } else {
             parts.append("Min : \(validTemps.min().map { "\($0)°" } ?? "--")    Max : \(validTemps.max().map { "\($0)°" } ?? "--")")
         }
@@ -443,10 +447,11 @@ struct HistoryGraph: View {
                     }
                     ctx.stroke(line, with: .color(NS.yellow), style: StrokeStyle(lineWidth: 1.3, dash: [4, 2]))
                 }
-                if secondLoads.count > 1 {
+                if secondLoads.filter({ $0 >= 0 }).count > 1 {
                     var line = Path()
-                    for (i, v) in secondLoads.enumerated() {
-                        i == 0 ? line.move(to: point(i, v, secondLoads.count)) : line.addLine(to: point(i, v, secondLoads.count))
+                    var started = false
+                    for (i, v) in secondLoads.enumerated() where v >= 0 {
+                        if started { line.addLine(to: point(i, v, secondLoads.count)) } else { line.move(to: point(i, v, secondLoads.count)); started = true }
                     }
                     ctx.stroke(line, with: .color(NS.iris), lineWidth: 1.2)
                 }
@@ -465,9 +470,9 @@ struct HistoryGraph: View {
                     func dot(_ p: CGPoint, _ c: Color) {
                         ctx.fill(Path(ellipseIn: CGRect(x: p.x - 3.5, y: p.y - 3.5, width: 7, height: 7)), with: .color(c))
                     }
-                    if hover < loads.count { dot(point(hover, loads[hover], loads.count), NS.orange) }
+                    if hover < loads.count, loads[hover] >= 0 { dot(point(hover, loads[hover], loads.count), NS.orange) }
                     if hover < powers.count, powers[hover] >= 0 { dot(powerPoint(hover), NS.yellow) }
-                    if hover < secondLoads.count { dot(point(hover, secondLoads[hover], secondLoads.count), NS.iris) }
+                    if hover < secondLoads.count, secondLoads[hover] >= 0 { dot(point(hover, secondLoads[hover], secondLoads.count), NS.iris) }
                     if hover < temps.count, temps[hover] >= 0 { dot(point(hover, temps[hover], temps.count), NS.red) }
                 }
             }
@@ -499,8 +504,8 @@ struct HistoryGraph: View {
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(NS.dim)
             }
             if i < temps.count, temps[i] >= 0 { tipRow("Temp", "\(temps[i]) °C", NS.red) }
-            if i < loads.count { tipRow(loadLabel, "\(loads[i]) %", NS.orange) }
-            if i < secondLoads.count { tipRow("Iris Xe", "\(secondLoads[i]) %", NS.iris) }
+            if i < loads.count, loads[i] >= 0 { tipRow(loadLabel, "\(loads[i]) %", NS.orange) }
+            if i < secondLoads.count, secondLoads[i] >= 0 { tipRow("Iris Xe", "\(secondLoads[i]) %", NS.iris) }
             if i < powers.count { tipRow("Power", powers[i] >= 0 ? String(format: "%.1f W", powers[i]) : "--", NS.yellow) }
         }
         .padding(.horizontal, 8)
@@ -683,9 +688,9 @@ struct MenuContent: View {
                 Text(error).font(.caption).foregroundStyle(NS.red)
             }
             HStack {
-                MiniFan(name: "CPU", rpm: s.cpuRPM, temp: s.cpuTemp)
+                MiniFan(name: "CPU", rpm: s.fromEC ? s.cpuRPM : nil, temp: s.fromEC ? s.cpuTemp : nil)
                 Spacer()
-                MiniFan(name: "GPU", rpm: s.gpuRPM, temp: model.gpuTemp)
+                MiniFan(name: "GPU", rpm: s.fromEC ? s.gpuRPM : nil, temp: model.gpuTemp)
             }
             .padding(.horizontal, 12)
             if let message = model.actionMessage {
@@ -739,7 +744,7 @@ struct MenuContent: View {
 
 struct MiniFan: View {
     let name: String
-    let rpm: Int
+    let rpm: Int?
     let temp: Int?
 
     var body: some View {

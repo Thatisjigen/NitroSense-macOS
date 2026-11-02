@@ -187,7 +187,7 @@ struct RedSlider: View {
 
 // Bladed fan ring with the RPM in the middle.
 struct FanDial: View {
-    let rpm: Int
+    let rpm: Int?
     var size: CGFloat = 112
 
     var body: some View {
@@ -211,7 +211,7 @@ struct FanDial: View {
                 ctx.stroke(inner, with: .color(NS.red.opacity(0.75)), lineWidth: 1.5)
             }
             VStack(spacing: 0) {
-                Text("\(rpm)").font(.system(size: size * 0.18, weight: .bold)).foregroundStyle(NS.text).monospacedDigit()
+                Text(rpm.map(String.init) ?? "--").font(.system(size: size * 0.18, weight: .bold)).foregroundStyle(NS.text).monospacedDigit()
                 Text("RPM").font(.system(size: size * 0.075)).foregroundStyle(NS.dim)
             }
         }

@@ -47,7 +47,7 @@ struct KeyboardPanel: View {
     let close: () -> Void
 
     var body: some View {
-        let on = model.snapshot.keyboardBit
+        let on = model.snapshot.fromEC && model.snapshot.keyboardBit
         DialogFrame(title: "Keyboard  Backlight", close: close) {
             Text("This keyboard is single-colour: on, off and variable brightness. The Fn keys drive it; this panel only reads.")
                 .font(.system(size: 12)).foregroundStyle(Color(white: 0.8))
@@ -56,7 +56,7 @@ struct KeyboardPanel: View {
                 .padding(14)
                 .background(RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.07)))
             VStack(alignment: .leading, spacing: 8) {
-                row("Backlight bit", on ? "On" : "Off", "KBBL, EC 0x48 bit 0") {
+                row("Backlight bit", model.snapshot.fromEC ? (on ? "On" : "Off") : "unknown", "KBBL, EC 0x48 bit 0") {
                     UnverifiedTag(help: "The firmware reports this bit with the keyboard-light hotkey event, but it has never been seen at 0: check that it follows the Fn key.")
                 }
                 row("Brightness level", "not exposed", "no EC byte identified yet: 'nitroctl ecdiff' finds it when the Fn key is pressed") { EmptyView() }
