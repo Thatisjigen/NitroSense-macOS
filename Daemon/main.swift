@@ -1,20 +1,24 @@
-// nitrod — root LaunchDaemon for NitroEC.kext
+// nitrod — root LaunchDaemon for NitroEC.kext, ANV15-52 branch
 //
-// Keeps NitroConfig in /Library/Application Support/NitroSense/config.json and
-// re-applies it at start and after wake (the keyboard controller and PSEE reset on
-// boot). Runs the fan curve every 2 s with a failsafe (fan.failsafeTemp, default
-// 95 °C: both fans max until 10 °C below). Puts fans back to Auto on exit. Clients talk to it over
-// /var/run/nitrod.sock (root:admin 0660), one JSON request per connection:
-//   {"cmd":"status"}                     -> config, live EC dump, failsafe, duties
-//   {"cmd":"set","config":{...partial}}  -> merge, validate, save, apply
-//   {"cmd":"apply"}                      -> re-apply everything
+// Serves the app and nitroctl over /var/run/nitrod.sock (root:admin 0660), one JSON request per connection, and reads the
+// CPU package power from powermetrics:
+//   {"cmd":"status"}                 -> config, live EC dump, mode fields, last firmware reading, CPU power. No firmware call.
+//   {"cmd":"firmware"}               -> runs the GET calls, once every few seconds at most
+//   {"cmd":"fan","mode":"auto|max"}  -> SetGamingFanBehavior, then read back; the choice is remembered
+//   {"cmd":"power","mode":"quiet|balance|performance"} -> SetGamingMiscSetting 0x0B, then read back; the choice is remembered
+//   {"cmd":"apply"}                  -> re-apply what the user chose
+//
+// Nothing has been tested on this board, so nitrod never calls the firmware by itself until the user chose a setting with
+// this version: no write, and no read either, at start or at wake. After that it re-applies only that choice, at start
+// and after wake: it reads first and writes only if the firmware moved. There is no curve and no failsafe: in Auto the EC
+// keeps its own fan control, and Max can only cool more. When it stops, it brings the fans back to Auto if it took them off.
+// No byte of the EC is written, and the charge limit stays with 'sudo nitroctl battery limit on|off'.
 
 import Foundation
 import IOKit
 import IOKit.pwr_mgt
 
-let tickInterval = 2.0
-let lowerAfterTicks = 5  // curve lowers duty only after 10 s below the current step
+let minFirmwareReadInterval = 3.0  // every GET is an SMI: a stuck client must not be able to hammer them
 
 func log(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
@@ -77,9 +81,9 @@ final class PowerMeter {
 final class Daemon {
     let ec: NitroEC
     var config: NitroConfig
-    var failsafe = false
-    var duty: [FanUnit: Int] = [:]      // last duty written by the curve
-    var lowerCount: [FanUnit: Int] = [:]
+    var firmware: FirmwareReading?
+    var lastFirmwareRead = Date.distantPast
+    var fanOffAuto = false              // this daemon took the fans off Auto
     var cpuPower: Double?
     var cpuPowerAt = Date.distantPast
     lazy var powerMeter = PowerMeter { [weak self] watts in
@@ -93,10 +97,10 @@ final class Daemon {
            let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let cfg = try? NitroConfig().merged(with: saved), (try? cfg.validate()) != nil {
             config = cfg
-            log("loaded \(nitrodConfigPath)")
+            log("loaded \(nitrodConfigPath); user choices: fan '\(cfg.userFan)', power '\(cfg.userMode)'")
         } else {
-            config = (try? ec.dump()).map { NitroConfig(fromEC: $0) } ?? NitroConfig()
-            log("no valid config, seeded from EC")
+            config = NitroConfig()
+            log("no valid config, starting from defaults")
             save()
         }
     }
@@ -112,130 +116,66 @@ final class Daemon {
         }
     }
 
-    func step(_ what: String, _ body: () throws -> Void) {
-        do { try body() } catch { log("\(what): \(error)") }
+    var gamingWMI: Bool { nitroECOffers("NitroEC Gaming WMI") }
+
+    func readFirmware() {
+        let reading = FirmwareReading(ec)
+        firmware = reading
+        lastFirmwareRead = Date()
+        if reading.fanCPU != nil, reading.fanGPU != nil, reading.profile != nil, !config.firmwareReadOK {
+            config.firmwareReadOK = true
+            save()
+        }
+        log("firmware read: fans \(reading.fanSummary), power mode \(reading.profile.map { profileName(UInt8(truncatingIfNeeded: $0)) } ?? "not readable")\(reading.errors.isEmpty ? "" : "; \(reading.errors.count) errors: \(reading.errors.joined(separator: "; "))")")
     }
 
-    // Everything the firmware forgets across boot/sleep. Each step is independent.
+    // Only what the user chose with this version; reads first, writes only if the firmware moved. Nothing otherwise, not
+    // even a read: a board on which this has never run stays untouched until the user tries it.
     func applyAll(reason: String) {
-        // Branch anv15-52-battery: nothing is re-applied at start, wake or SIGHUP, the battery limit included; the firmware
-        // keeps that one by itself and the user sets it by hand with 'sudo nitroctl battery limit on|off'.
-        if Reg.readOnlyModel { log("apply (\(reason)): skipped, \(readOnlyMessage)"); return }
-        log("apply (\(reason))")
-        step("psee") { try setPSEE(ec, true) }
-        step("mode") { try setNitroMode(ec, config.nitroMode) }
-        step("battery limit") { try setBatteryLimit(ec, config.batteryLimit) }
-        step("usb charge") { try setUSBCharge(ec, config.usbCharge) }
-        step("kb timeout") { try setKBTimeout(ec, config.kbTimeout) }
-        step("led") { try applyLEDConfig() }
-        applyFans()
-    }
-
-    func applyLEDConfig() throws {
-        let led = config.led
-        try initLED(ec)
-        try applyLED(ec, LEDState(effect: UInt8(ledEffects.firstIndex(of: led.effect) ?? 0),
-                                  speed: UInt8(led.speed), brightness: UInt8(led.brightness),
-                                  direction: UInt8(led.direction), color: try parseRGB(led.color)))
-        if led.effect == "static" {
-            for (i, zone) in led.zones.enumerated() {
-                let (r, g, b) = try parseRGB(zone)
-                try checkWMBH(try ec.wmbh(0x06, [UInt8(1 << i), r, g, b]), "zone colour")
-            }
-        }
-    }
-
-    func setUnit(_ unit: FanUnit, manualPercent percent: Int) throws {
-        try ec.writeByte(unit.speedReg, percent)
-        if Int(try ec.readByte(UInt8(unit.modeReg))) != unit.manual {
-            try ec.writeByte(unit.modeReg, unit.manual)
-        }
-        duty[unit] = percent
-    }
-
-    func curveDrives(_ unit: FanUnit) -> Bool { unit == .cpu || config.fan.curveGPU }
-
-    func applyFans() {
-        if Reg.readOnlyModel { return }
-        duty = [:]
-        lowerCount = [:]
-        if failsafe { return }
-        step("fans") {
-            try setPSEE(ec, true)
-            for unit in FanUnit.allCases {
-                switch config.fan.mode {
-                case "max":
-                    try ec.writeByte(unit.modeReg, unit.max)
-                case "manual":
-                    try setUnit(unit, manualPercent: unit == .cpu ? config.fan.cpuPercent : config.fan.gpuPercent)
-                case "curve":
-                    if !curveDrives(unit) { try ec.writeByte(unit.modeReg, unit.auto) }
-                    // otherwise the next tick picks the duty
-                default:
-                    try ec.writeByte(unit.modeReg, unit.auto)
-                }
-            }
-        }
-        if config.fan.mode == "curve" { tick() }
-    }
-
-    func tick() {
-        if Reg.readOnlyModel { return }   // no curve, no failsafe writes: this branch only reads
-        guard let d = try? ec.dump() else { return }
-        let temps: [FanUnit: UInt8] = [.cpu: d[Reg.cpuTemp], .gpu: d[Reg.gpuTemp]]
-        let hottest = max(temps[.cpu]!, temps[.gpu]!)
-
-        let failsafeOn = UInt8(config.fan.failsafeTemp)
-        let failsafeOff = failsafeOn - 10
-        if !failsafe && hottest >= failsafeOn {
-            failsafe = true
-            log("failsafe ON at \(hottest) °C: fans max")
-        } else if failsafe && hottest <= failsafeOff {
-            failsafe = false
-            log("failsafe OFF at \(hottest) °C: back to \(config.fan.mode)")
-            applyFans()
+        guard !config.userFan.isEmpty || !config.userMode.isEmpty else {
+            log("apply (\(reason)): nothing, no setting was chosen by the user with this version")
             return
         }
-        if failsafe {
-            step("failsafe") {
-                try setPSEE(ec, true)
-                for unit in FanUnit.allCases where Int(d[unit.modeReg]) != unit.max {
-                    try ec.writeByte(unit.modeReg, unit.max)
-                }
-            }
+        guard gamingWMI else {
+            log("apply (\(reason)): skipped, the loaded kext and SSDT offer no gaming WMI")
             return
         }
-
-        guard config.fan.mode == "curve" else { return }
-        step("curve") {
-            if d[Reg.battery] & 0x10 == 0 { try setPSEE(ec, true) }
-            for unit in FanUnit.allCases where curveDrives(unit) {
-                let target = curvePercent(config.fan.curve, Int(temps[unit]!))
-                let current = duty[unit]
-                // Someone else (nitroctl, EC after wake) changed the mode: take it back.
-                let modeLost = Int(d[unit.modeReg]) != unit.manual
-                if current == nil || target > current! || modeLost {
-                    try setUnit(unit, manualPercent: target)
-                    lowerCount[unit] = 0
-                } else if target < current! {
-                    lowerCount[unit, default: 0] += 1
-                    if lowerCount[unit]! >= lowerAfterTicks {
-                        try setUnit(unit, manualPercent: target)
-                        lowerCount[unit] = 0
-                    }
-                } else {
-                    lowerCount[unit] = 0
+        if let wanted = powerModes[config.userMode] {
+            do {
+                let now = try readMiscSetting(ec, GamingWMI.miscPlatformProfile)
+                if now != wanted {
+                    log("apply (\(reason)): power mode \(profileName(now)) -> \(profileName(wanted))")
+                    try setPlatformProfile(ec, wanted)
                 }
+            } catch {
+                log("apply (\(reason)): power mode: \(error)")
             }
         }
+        if !config.userFan.isEmpty {
+            let wanted = config.userFan == "max" ? 2 : 1
+            do {
+                let cpu = try readFanBehavior(ec, gpu: false), gpu = try readFanBehavior(ec, gpu: true)
+                // 0 is the firmware's own default before anyone set it: that is Auto too, for a choice of Auto.
+                let alreadyThere = wanted == 1 ? cpu <= 1 && gpu <= 1 : cpu == wanted && gpu == wanted
+                if !alreadyThere {
+                    log("apply (\(reason)): fans CPU \(fanBehaviorName(cpu)), GPU \(fanBehaviorName(gpu)) -> \(fanBehaviorName(wanted))")
+                    if wanted != 1 { fanOffAuto = true }
+                    try setFanBehavior(ec, max: wanted != 1)
+                    if wanted == 1 { fanOffAuto = false }
+                }
+            } catch {
+                log("apply (\(reason)): fans: \(error)")
+            }
+        }
+        readFirmware()
     }
 
     func shutdown() {
-        log("stopping: fans back to Auto")
-        powerMeter.stop()
-        for unit in FanUnit.allCases {
-            _ = try? ec.writeByte(unit.modeReg, unit.auto)
+        if fanOffAuto {
+            log("stopping: fans back to Auto")
+            do { try setFanBehavior(ec, max: false) } catch { log("fans back to Auto: \(error)") }
         }
+        powerMeter.stop()
         unlink(nitrodSocketPath)
         exit(0)
     }
@@ -243,13 +183,18 @@ final class Daemon {
     // MARK: socket requests
 
     func statusReply() -> [String: Any] {
-        var reply: [String: Any] = ["ok": true, "failsafe": failsafe]
+        var reply: [String: Any] = ["ok": true]
         if let data = try? JSONEncoder().encode(config), let obj = try? JSONSerialization.jsonObject(with: data) {
             reply["config"] = obj
         }
-        reply["duty"] = ["cpu": duty[.cpu].map { $0 as Any } ?? NSNull(), "gpu": duty[.gpu].map { $0 as Any } ?? NSNull()]
         if let d = try? ec.dump() { reply["ec"] = d.map { Int($0) } }
         if let cpuPower, Date().timeIntervalSince(cpuPowerAt) < 6 { reply["cpuPower"] = cpuPower }
+        var control: [String: Any] = ["gamingWMI": gamingWMI]
+        if let state = try? ec.modeState() { control["modeState"] = state.map { Int($0) } }
+        if let firmware, let data = try? JSONEncoder().encode(firmware), let obj = try? JSONSerialization.jsonObject(with: data) {
+            control["firmware"] = obj
+        }
+        reply["control"] = control
         return reply
     }
 
@@ -260,33 +205,63 @@ final class Daemon {
         case "apply":
             applyAll(reason: "client")
             return statusReply()
-        case "set":
-            guard let patch = request["config"] as? [String: Any] else {
-                return ["ok": false, "error": "set needs a config object"]
+        case "firmware":
+            guard gamingWMI else { return noGamingWMI() }
+            if Date().timeIntervalSince(lastFirmwareRead) >= minFirmwareReadInterval { readFirmware() }
+            return statusReply()
+        case "fan":
+            guard let mode = request["mode"] as? String, ["auto", "max"].contains(mode) else {
+                return ["ok": false, "error": "fan mode must be auto or max: manual duty and the curve are left out on the \(Reg.model)"]
             }
+            guard gamingWMI else { return noGamingWMI() }
             do {
-                if Reg.readOnlyModel, let wanted = patch["batteryLimit"] as? Bool, wanted != config.batteryLimit {
-                    return ["ok": false, "error": "nitrod does not write on the \(Reg.model): set the charge limit with 'sudo nitroctl battery limit on|off'"]
-                }
-                let next = try config.merged(with: patch)
-                try next.validate()
-                let old = config
-                config = next
+                if mode == "max" { fanOffAuto = true }
+                try setFanBehavior(ec, max: mode == "max")
+                if mode == "auto" { fanOffAuto = false }
+                config.userFan = mode
                 save()
-                if old.nitroMode != next.nitroMode { step("mode") { try setNitroMode(ec, next.nitroMode) } }
-                // batteryLimit changes are refused above on this branch: nitrod has no write path to the firmware.
-                if old.usbCharge != next.usbCharge { step("usb charge") { try setUSBCharge(ec, next.usbCharge) } }
-                if old.kbTimeout != next.kbTimeout { step("kb timeout") { try setKBTimeout(ec, next.kbTimeout) } }
-                if old.led != next.led { step("led") { try applyLEDConfig() } }
-                if old.fan != next.fan { applyFans() }
-                log("config updated")
-                return statusReply()
+                log("fan: \(mode), asked by a client")
+                readFirmware()
+                var reply = statusReply()
+                let wanted = mode == "max" ? 2 : 1
+                if firmware?.fanCPU != wanted || firmware?.fanGPU != wanted {
+                    reply["warning"] = "the firmware accepted fan \(mode) but now reports \(firmware?.fanSummary ?? "nothing")"
+                }
+                return reply
             } catch {
-                return ["ok": false, "error": "\(error)"]
+                log("fan \(mode): \(error)")
+                return ["ok": false, "error": "fan \(mode): \(error)"]
             }
+        case "power":
+            guard let mode = request["mode"] as? String, let value = powerModes[mode] else {
+                return ["ok": false, "error": "power mode must be quiet, balance or performance"]
+            }
+            guard gamingWMI else { return noGamingWMI() }
+            do {
+                try setPlatformProfile(ec, value)
+                config.userMode = mode
+                save()
+                log("power: \(mode), asked by a client")
+                readFirmware()
+                var reply = statusReply()
+                if firmware?.profile != Int(value) {
+                    reply["warning"] = "the firmware accepted \(mode) but now reports \(firmware?.profile.map { profileName(UInt8(truncatingIfNeeded: $0)) } ?? "nothing")"
+                }
+                return reply
+            } catch {
+                log("power \(mode): \(error)")
+                return ["ok": false, "error": "power \(mode): \(error)"]
+            }
+        case "set":
+            // The upstream way of changing settings. An older app may still send it: nothing it asks for exists on this board.
+            return ["ok": false, "error": "nitrod does not take config patches on the \(Reg.model): use the fan and power commands; the charge limit is 'sudo nitroctl battery limit on|off'"]
         default:
-            return ["ok": false, "error": "cmd must be status, set or apply"]
+            return ["ok": false, "error": "cmd must be status, firmware, fan, power or apply"]
         }
+    }
+
+    private func noGamingWMI() -> [String: Any] {
+        ["ok": false, "error": "the loaded NitroEC.kext and SSDT-NITRO offer no gaming WMI: they need the build of branch anv15-52-control and a reboot"]
     }
 }
 
@@ -398,12 +373,7 @@ for sig in [SIGTERM, SIGINT, SIGHUP] {
     signalSources.append(source)
 }
 
-let timer = DispatchSource.makeTimerSource(queue: .main)
-timer.schedule(deadline: .now() + tickInterval, repeating: tickInterval)
-timer.setEventHandler { daemon.tick() }
-timer.resume()
-
-log("running (fan mode \(daemon.config.fan.mode))")
-withExtendedLifetime((server, timer, signalSources)) {
+log("running")
+withExtendedLifetime((server, signalSources)) {
     dispatchMain()
 }
