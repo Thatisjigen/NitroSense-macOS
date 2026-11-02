@@ -1,21 +1,19 @@
-// Main window laid out like Acer NitroSense 3 (AN515-57): header bar, Fan Control
-// panel with two fan dials, Power Plan and Monitoring panels below. Keyboard
-// Lighting and the fan curve open as overlay dialogs; the gear opens a settings menu.
+// Main window laid out like Acer NitroSense 3 (AN515-57): header bar, Fan Control panel with two fan dials, Power Plan and
+// Monitoring panels below. The keyboard backlight opens as an overlay dialog; the gear opens a settings menu. On the ANV15-52
+// only what can work is clickable (Auto and Max, the three power modes, marked unverified, and the login item); the rest
+// says why it is not there.
 
 import IOKit.ps
 import ServiceManagement
 import SwiftUI
 
-let effectNames: [String: String] = [
-    "static": "Static", "breathing": "Breathing", "neon": "Neon", "wave": "Wave",
-    "shifting": "Shifting", "zoom": "Zoom", "meteor": "Meteor", "twinkling": "Twinkling",
-]
-
 func tempColor(_ t: Int) -> Color {
     t >= 90 ? .red : t >= 75 ? NS.orange : t >= 60 ? .yellow : .green
 }
 
-enum Overlay { case none, lighting, curve }
+enum Overlay { case none, keyboard, curve }
+
+let unverifiedFirmwareHelp = "Goes through the firmware's gaming WMI. It has never been tried on this board: the firmware answers with a status and the state is read back, but what it really does has to be checked."
 
 // MARK: - Main window
 
@@ -30,10 +28,10 @@ struct MainView: View {
                 HeaderBar(overlay: $overlay)
                 if let error = model.error {
                     StatusStrip(text: error, color: NS.red, icon: "exclamationmark.triangle.fill")
-                } else if model.failsafe {
-                    StatusStrip(text: "Failsafe: ≥ \(model.config.fan.failsafeTemp) °C, fans at max until \(model.config.fan.failsafeTemp - 10) °C", color: NS.orange, icon: "flame.fill")
+                } else if let message = model.actionMessage {
+                    StatusStrip(text: message, color: model.actionIsWarning ? NS.orange : NS.red, icon: "exclamationmark.triangle.fill")
                 }
-                FanControlPanel(overlay: $overlay).frame(height: 200)
+                FanControlPanel().frame(height: 200)
                 HStack(spacing: 8) {
                     PowerPlanPanel().frame(width: 210)
                     MonitoringPanel()
@@ -46,8 +44,8 @@ struct MainView: View {
                 Color.black.opacity(0.55).ignoresSafeArea()
                     .onTapGesture { overlay = .none }
                 Group {
-                    if overlay == .lighting {
-                        LightingPanel { overlay = .none }
+                    if overlay == .keyboard {
+                        KeyboardPanel { overlay = .none }
                     } else {
                         CurvePanel { overlay = .none }
                     }
@@ -59,6 +57,7 @@ struct MainView: View {
         .ignoresSafeArea()  // header shares the row with the window buttons, as in NitroSense
         .preferredColorScheme(.dark)
         .animation(.easeOut(duration: 0.15), value: overlay)
+        .onAppear { model.requestTrustedRead() }
     }
 }
 
@@ -102,7 +101,7 @@ struct HeaderBar: View {
                     .foregroundStyle(Color(white: 0.82))
                     .padding(.leading, 70)  // clear of the window buttons
                 Spacer()
-                HeaderIcon(icon: "keyboard", help: "Keyboard Lighting") { overlay = .lighting }
+                HeaderIcon(icon: "keyboard", help: "Keyboard backlight (read only on this model)") { overlay = .keyboard }
                 HeaderIcon(icon: "gearshape.fill", help: "Settings") { showSettings.toggle() }
                     .popover(isPresented: $showSettings, arrowEdge: .bottom) {
                         SettingsMenu().environment(model)
@@ -138,28 +137,27 @@ struct HeaderIcon: View {
 
 // MARK: - Fan Control
 
+// Auto and Max only, both fans together. Custom duty and the curve stay out on this board: see NitroEC.cpp.
 let fanModeItems: [(mode: String, label: String, icon: String)] = [
     ("auto", "Auto", "fan"),
     ("max", "Max", "fan.fill"),
-    ("manual", "Custom", "slider.horizontal.3"),
-    ("curve", "Curve", "chart.xyaxis.line"),
 ]
 
 struct FanControlPanel: View {
     @Environment(NitroModel.self) private var model
-    @Binding var overlay: Overlay
 
     var body: some View {
-        let fan = model.config.fan
         let s = model.snapshot
+        let control = model.control
         NSPanel("Fan Control") {
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     ForEach(Array(fanModeItems.enumerated()), id: \.offset) { i, item in
                         if i > 0 { NSDivider() }
-                        NSListItem(label: item.label, icon: item.icon, selected: fan.mode == item.mode) {
-                            setMode(item.mode)
+                        NSListItem(label: item.label, icon: item.icon, selected: model.currentFan == item.mode, enabled: control.writable) {
+                            model.setFan(item.mode)
                         }
+                        .help(control.blockedReason ?? unverifiedFirmwareHelp)
                     }
                 }
                 .frame(width: 170)
@@ -167,63 +165,43 @@ struct FanControlPanel: View {
 
                 Spacer()
                 HStack(spacing: 22) {
-                    FanSide(name: "CPU", temp: s.cpuTemp, alignment: .trailing,
-                            percent: fan.mode == "manual" ? fan.cpuPercent : nil) { v in
-                        model.config.fan.cpuPercent = v
-                        model.set(["fan": ["cpuPercent": v]], delay: 0)
-                    }
+                    FanSide(name: "CPU", temp: s.cpuTemp, alignment: .trailing)
                     FanDial(rpm: s.cpuRPM)
                     FanDial(rpm: s.gpuRPM)
-                    FanSide(name: "GPU", temp: s.gpuTemp, alignment: .leading,
-                            percent: fan.mode == "manual" ? fan.gpuPercent : nil) { v in
-                        model.config.fan.gpuPercent = v
-                        model.set(["fan": ["gpuPercent": v]], delay: 0)
-                    }
+                    FanSide(name: "GPU", temp: model.gpuTemp, alignment: .leading, tempHelp: model.gpu.tempNote)
                 }
                 Spacer()
             }
         } accessory: {
             HStack(spacing: 8) {
-                if fan.mode == "curve" {
-                    Text("CPU \(s.cpuDuty)%" + (fan.curveGPU ? " · GPU \(s.gpuDuty)%" : ""))
-                        .font(.system(size: 11)).foregroundStyle(NS.dim).monospacedDigit()
-                }
-                NSButton(label: "Fan Curve", icon: "chart.xyaxis.line") { overlay = .curve }
+                Text(statusLine).font(.system(size: 11)).foregroundStyle(NS.dim).monospacedDigit()
+                UnverifiedTag(help: unverifiedFirmwareHelp)
+                NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: control.writable) { model.readFirmware() }
+                    .help(control.blockedReason ?? "Asks the firmware for the fan, mode, keyboard and charge limit state through nitrod. Each call is one SMI, so it never runs by itself until the first read has answered.")
             }
         }
     }
 
-    private func setMode(_ mode: String) {
-        model.config.fan.mode = mode
-        model.set(["fan": ["mode": mode]], delay: 0)
+    private var statusLine: String {
+        if let reason = model.control.blockedReason { return reason }
+        if let firmware = model.control.firmware { return "Firmware: \(firmware.fanSummary)" }
+        return "State not read yet"
     }
 }
 
 struct FanSide: View {
-    @Environment(NitroModel.self) private var model
     let name: String
-    let temp: Int
+    let temp: Int?
     let alignment: HorizontalAlignment
-    let percent: Int?
-    let commit: (Int) -> Void
+    var tempHelp: String?
 
     var body: some View {
         VStack(alignment: alignment, spacing: 6) {
             Text(name).font(.system(size: 14, weight: .medium)).foregroundStyle(NS.text)
-            Text("\(temp)°C").font(.system(size: 11)).foregroundStyle(tempColor(temp)).monospacedDigit()
-            if let percent {
-                RedSlider(value: Double(percent), range: 20...100, step: 5) { commit(Int($0)) }
-                    .frame(width: 120)
-                HStack {
-                    if alignment == .leading { Text("\(percent)%").monospacedDigit() }
-                    NSButton(label: "Auto") {
-                        model.config.fan.mode = "auto"
-                        model.set(["fan": ["mode": "auto"]], delay: 0)
-                    }
-                    if alignment == .trailing { Text("\(percent)%").monospacedDigit() }
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(NS.dim)
+            if let temp {
+                Text("\(temp)°C").font(.system(size: 11)).foregroundStyle(tempColor(temp)).monospacedDigit()
+            } else {
+                Text("--°C").font(.system(size: 11)).foregroundStyle(NS.dim).help(tempHelp ?? "No source for this temperature")
             }
         }
         .frame(width: 130, alignment: alignment == .leading ? .leading : .trailing)
@@ -234,8 +212,8 @@ struct FanSide: View {
 
 let powerItems: [(mode: String, label: String, icon: String)] = [
     ("quiet", "Quiet", "leaf.fill"),
-    ("default", "Balance", "gauge.with.dots.needle.50percent"),
-    ("extreme", "Extreme", "bolt.fill"),
+    ("balance", "Balance", "gauge.with.dots.needle.50percent"),
+    ("performance", "Performance", "bolt.fill"),
 ]
 
 struct PowerPlanPanel: View {
@@ -243,6 +221,7 @@ struct PowerPlanPanel: View {
 
     var body: some View {
         let ac = model.snapshot.acPlugged
+        let control = model.control
         NSPanel("Power Plan") {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Mode").font(.system(size: 11)).foregroundStyle(NS.dim).padding(.horizontal, 12).padding(.top, 6)
@@ -252,19 +231,33 @@ struct PowerPlanPanel: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
-                .help("Current power source")
+                .help("Current power source: an indicator, not a switch")
                 VStack(spacing: 0) {
                     ForEach(Array(powerItems.enumerated()), id: \.offset) { i, item in
                         if i > 0 { NSDivider() }
-                        NSListItem(label: item.label, icon: item.icon, selected: model.config.nitroMode == item.mode) {
-                            model.config.nitroMode = item.mode
-                            model.set(["nitroMode": item.mode], delay: 0)
+                        NSListItem(label: item.label, icon: item.icon, selected: model.currentProfile == powerModes[item.mode], enabled: control.writable) {
+                            model.setPower(item.mode)
                         }
+                        .help(control.blockedReason ?? unverifiedFirmwareHelp)
                     }
                 }
                 .padding(.vertical, 4)
+                Text(statusLine)
+                    .font(.system(size: 10)).foregroundStyle(NS.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12).padding(.bottom, 6)
             }
+        } accessory: {
+            UnverifiedTag(help: unverifiedFirmwareHelp)
         }
+    }
+
+    private var statusLine: String {
+        guard let value = model.currentProfile else { return "Mode unknown (EC FANT \(model.snapshot.fant))" }
+        var line = "\(profileName(value)), \(model.control.firmware?.profile != nil ? "answered by the firmware" : "read from EC FANT")"
+        if !powerModes.values.contains(value) { line += " (not offered here)" }
+        if let reason = model.control.blockedReason { line += ". Changing it \(reason)." }
+        return line
     }
 }
 
@@ -298,6 +291,8 @@ struct MonitoringPanel: View {
                     Text("Loading (%)").foregroundStyle(NS.orange)
                     Text("/").foregroundStyle(NS.dim)
                     Text("Power (W)").foregroundStyle(NS.yellow)
+                    Text("/").foregroundStyle(NS.dim)
+                    Text("Iris Xe (%)").foregroundStyle(NS.iris)
                     Spacer()
                     if let w = model.batteryPower {
                         Label(String(format: "On battery: %.1f W", w), systemImage: "battery.50percent")
@@ -310,8 +305,11 @@ struct MonitoringPanel: View {
                            powers: h.map { $0.cpuPower ?? -1 },
                            temp: model.snapshot.cpuTemp, load: model.cpuLoad, power: model.cpuPower)
                     .help("CPU power = Intel package (cores + iGPU + system agent), from powermetrics")
-                MonitorRow(name: "GPU", times: h.map(\.date), temps: h.map(\.gpuTemp), loads: [], powers: [],
-                           temp: model.snapshot.gpuTemp, load: nil, power: nil)
+                MonitorRow(name: "RTX 5050", times: h.map(\.date), temps: h.map { $0.gpuTemp ?? -1 }, loads: h.map { $0.rtxLoad ?? 0 }, powers: [],
+                           temp: model.gpuTemp, load: model.gpu.rtxLoad, power: model.gpu.rtxPower,
+                           secondLoads: h.map { $0.irisLoad ?? 0 }, secondLoad: model.gpu.irisLoad)
+                    .help("Load read from the IORegistry: RTX 5050 from NVAccel, Iris Xe from IntelAccelerator. "
+                          + (model.gpuTemp == nil ? "No temperature shown: \(model.gpu.tempNote ?? "no source")." : ""))
             }
             .padding(.horizontal, 12)
             .padding(.top, 6)
@@ -323,28 +321,37 @@ struct MonitoringPanel: View {
 struct MonitorRow: View {
     let name: String
     let times: [Date]
-    let temps: [Int]
+    let temps: [Int]            // -1 = no sample
     let loads: [Int]
     let powers: [Double]
-    let temp: Int
+    let temp: Int?
     let load: Int?
     let power: Double?
+    var secondLoads: [Int] = []  // the Iris Xe in the GPU row
+    var secondLoad: Int?
 
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(rangeText).font(.system(size: 10)).foregroundStyle(NS.dim).monospacedDigit()
                 ZStack(alignment: .topLeading) {
-                    HistoryGraph(temps: temps, loads: loads, powers: powers, times: times)
+                    HistoryGraph(temps: temps, loads: loads, powers: powers, times: times, secondLoads: secondLoads,
+                                 loadLabel: secondLoads.isEmpty ? "Load" : "RTX")
                     Text(name).font(.system(size: 11, weight: .medium)).foregroundStyle(NS.text).padding(6)
                 }
             }
             VStack(alignment: .trailing, spacing: 2) {
-                Text("\(temp)°").font(.system(size: 22, weight: .light)).foregroundStyle(NS.red).monospacedDigit()
+                if let temp {
+                    Text("\(temp)°").font(.system(size: 22, weight: .light)).foregroundStyle(NS.red).monospacedDigit()
+                }
                 Text(load.map { "\($0) %" } ?? "-- %").font(.system(size: 15, weight: .light)).foregroundStyle(NS.orange).monospacedDigit()
-                if !powers.isEmpty {
+                if !powers.isEmpty || power != nil {
                     Text(power.map { String(format: "%.1f W", $0) } ?? "-- W")
                         .font(.system(size: 15, weight: .light)).foregroundStyle(NS.yellow).monospacedDigit()
+                }
+                if !secondLoads.isEmpty {
+                    Text(secondLoad.map { "Iris \($0) %" } ?? "Iris -- %")
+                        .font(.system(size: 12, weight: .light)).foregroundStyle(NS.iris).monospacedDigit()
                 }
             }
             .frame(width: 64, alignment: .trailing)
@@ -352,10 +359,16 @@ struct MonitorRow: View {
     }
 
     private var rangeText: String {
-        var t = "Min : \(temps.min().map { "\($0)°" } ?? "--")    Max : \(temps.max().map { "\($0)°" } ?? "--")"
-        let p = powers.filter { $0 >= 0 }
-        if let maxW = p.max() { t += String(format: "    Peak : %.0f W", maxW) }
-        return t
+        var parts: [String] = []
+        let validTemps = temps.filter { $0 >= 0 }
+        if !secondLoads.isEmpty {
+            if let minT = validTemps.min(), let maxT = validTemps.max() { parts.append("Min : \(minT)°    Max : \(maxT)°") }
+            parts.append("Peak : \(loads.max().map { "\($0) %" } ?? "--")    Iris : \(secondLoads.max().map { "\($0) %" } ?? "--")")
+        } else {
+            parts.append("Min : \(validTemps.min().map { "\($0)°" } ?? "--")    Max : \(validTemps.max().map { "\($0)°" } ?? "--")")
+        }
+        if let maxW = powers.filter({ $0 >= 0 }).max() { parts.append(String(format: "Peak : %.0f W", maxW)) }
+        return parts.joined(separator: "    ")
     }
 }
 
@@ -365,11 +378,13 @@ struct HistoryGraph: View {
     let loads: [Int]
     var powers: [Double] = []   // -1 = no sample; scaled to max(60 W, peak)
     var times: [Date] = []
+    var secondLoads: [Int] = [] // a second load drawn as a thin line: the Iris Xe in the GPU row
+    var loadLabel = "Load"
     var capacity = 150
     @State private var hoverX: CGFloat?
     @Environment(\.snapshotMode) private var snapshotMode
 
-    private var count: Int { max(temps.count, loads.count, powers.count) }
+    private var count: Int { max(temps.count, loads.count, powers.count, secondLoads.count) }
 
     private func x0(_ width: CGFloat) -> CGFloat { width - CGFloat(count - 1) * width / CGFloat(capacity - 1) }
 
@@ -421,10 +436,18 @@ struct HistoryGraph: View {
                     }
                     ctx.stroke(line, with: .color(NS.yellow), style: StrokeStyle(lineWidth: 1.3, dash: [4, 2]))
                 }
-                if temps.count > 1 {
+                if secondLoads.count > 1 {
                     var line = Path()
-                    for (i, v) in temps.enumerated() {
-                        i == 0 ? line.move(to: point(i, v, temps.count)) : line.addLine(to: point(i, v, temps.count))
+                    for (i, v) in secondLoads.enumerated() {
+                        i == 0 ? line.move(to: point(i, v, secondLoads.count)) : line.addLine(to: point(i, v, secondLoads.count))
+                    }
+                    ctx.stroke(line, with: .color(NS.iris), lineWidth: 1.2)
+                }
+                if temps.filter({ $0 >= 0 }).count > 1 {
+                    var line = Path()
+                    var started = false
+                    for (i, v) in temps.enumerated() where v >= 0 {
+                        if started { line.addLine(to: point(i, v, temps.count)) } else { line.move(to: point(i, v, temps.count)); started = true }
                     }
                     ctx.stroke(line, with: .color(NS.red), lineWidth: 1.5)
                 }
@@ -437,7 +460,8 @@ struct HistoryGraph: View {
                     }
                     if hover < loads.count { dot(point(hover, loads[hover], loads.count), NS.orange) }
                     if hover < powers.count, powers[hover] >= 0 { dot(powerPoint(hover), NS.yellow) }
-                    if hover < temps.count { dot(point(hover, temps[hover], temps.count), NS.red) }
+                    if hover < secondLoads.count { dot(point(hover, secondLoads[hover], secondLoads.count), NS.iris) }
+                    if hover < temps.count, temps[hover] >= 0 { dot(point(hover, temps[hover], temps.count), NS.red) }
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -467,8 +491,9 @@ struct HistoryGraph: View {
                 Text(times[i], format: .dateTime.hour().minute().second())
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(NS.dim)
             }
-            if i < temps.count { tipRow("Temp", "\(temps[i]) °C", NS.red) }
-            if i < loads.count { tipRow("Load", "\(loads[i]) %", NS.orange) }
+            if i < temps.count, temps[i] >= 0 { tipRow("Temp", "\(temps[i]) °C", NS.red) }
+            if i < loads.count { tipRow(loadLabel, "\(loads[i]) %", NS.orange) }
+            if i < secondLoads.count { tipRow("Iris Xe", "\(secondLoads[i]) %", NS.iris) }
             if i < powers.count { tipRow("Power", powers[i] >= 0 ? String(format: "%.1f W", powers[i]) : "--", NS.yellow) }
         }
         .padding(.horizontal, 8)
@@ -527,12 +552,15 @@ struct SettingsMenu: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Section("Power Settings") {
-                SettingRow(label: "Battery charge limit (80%)", isOn: model.config.batteryLimit) { set(\.batteryLimit, "batteryLimit", $0) }
-                SettingRow(label: "USB charging when powered off", isOn: model.config.usbCharge) { set(\.usbCharge, "usbCharge", $0) }
+                InfoRow(label: "Battery charge limit (80%)", value: batteryLimitText,
+                        note: "Set by hand: sudo nitroctl battery limit on|off")
+                InfoRow(label: "USB charging when powered off", value: "not here",
+                        note: "No firmware route verified on this board")
             }
             Divider().overlay(Color(white: 0.25))
             Section("Keyboard Settings") {
-                SettingRow(label: "Backlight off after 30 seconds", isOn: model.config.kbTimeout) { set(\.kbTimeout, "kbTimeout", $0) }
+                InfoRow(label: "Backlight off after 30 seconds", value: "not here",
+                        note: "No firmware route verified on this board")
             }
             Divider().overlay(Color(white: 0.25))
             Section("General") {
@@ -547,7 +575,8 @@ struct SettingsMenu: View {
                     Text(model.connected ? "nitrod running" : "nitrod not reachable")
                         .foregroundStyle(model.connected ? NS.dim : NS.red)
                     Spacer()
-                    NSButton(label: "Re-apply all") { model.reapply() }
+                    NSButton(label: "Re-apply my settings", enabled: model.control.writable && hasChoices) { model.reapply() }
+                        .help(choicesHelp)
                 }
                 .font(.system(size: 12))
             }
@@ -557,9 +586,16 @@ struct SettingsMenu: View {
         .preferredColorScheme(.dark)
     }
 
-    private func set(_ key: WritableKeyPath<NitroConfig, Bool>, _ name: String, _ value: Bool) {
-        model.config[keyPath: key] = value
-        model.set([name: value], delay: 0)
+    private var batteryLimitText: String {
+        guard let limit = model.control.firmware?.batteryLimit else { return "not read" }
+        return limit ? "on" : "off"
+    }
+
+    private var hasChoices: Bool { !model.config.userFan.isEmpty || !model.config.userMode.isEmpty }
+
+    private var choicesHelp: String {
+        guard hasChoices else { return "Nothing to re-apply: nitrod re-applies only what you chose in this version, at start and after wake." }
+        return "Fan: \(model.config.userFan.isEmpty ? "not chosen" : model.config.userFan). Power mode: \(model.config.userMode.isEmpty ? "not chosen" : model.config.userMode)."
     }
 
     struct Section<Content: View>: View {
@@ -574,6 +610,24 @@ struct SettingsMenu: View {
                 Text(title).font(.system(size: 12, weight: .bold)).foregroundStyle(NS.text)
                 content
             }
+        }
+    }
+}
+
+// Something that cannot be changed from here: shown as text, with the reason, so it does not look clickable.
+struct InfoRow: View {
+    let label: String
+    let value: String
+    let note: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label).font(.system(size: 12)).foregroundStyle(NS.dim)
+                Spacer()
+                Text(value).font(.system(size: 12)).foregroundStyle(NS.dim)
+            }
+            Text(note).font(.system(size: 10)).foregroundStyle(NS.faint)
         }
     }
 }
@@ -599,7 +653,7 @@ struct MenuBarLabel: View {
 
     var body: some View {
         if model.connected {
-            Text("\(model.snapshot.cpuTemp)° · \(model.snapshot.gpuTemp)°")
+            Text(model.gpuTemp.map { "\(model.snapshot.cpuTemp)° · \($0)°" } ?? "\(model.snapshot.cpuTemp)°")
         } else {
             Image(systemName: "fan.slash")
         }
@@ -624,18 +678,17 @@ struct MenuContent: View {
             HStack {
                 MiniFan(name: "CPU", rpm: s.cpuRPM, temp: s.cpuTemp)
                 Spacer()
-                MiniFan(name: "GPU", rpm: s.gpuRPM, temp: s.gpuTemp)
+                MiniFan(name: "GPU", rpm: s.gpuRPM, temp: model.gpuTemp)
             }
             .padding(.horizontal, 12)
-            if model.failsafe {
-                Label("Failsafe: fans at max", systemImage: "flame.fill").font(.caption).foregroundStyle(NS.orange)
+            if let message = model.actionMessage {
+                Text(message).font(.caption).foregroundStyle(model.actionIsWarning ? NS.orange : NS.red)
             }
             menuSection("Fan Control") {
                 HStack(spacing: 10) {
                     ForEach(fanModeItems, id: \.mode) { item in
-                        HexRadio(label: item.label, selected: model.config.fan.mode == item.mode) {
-                            model.config.fan.mode = item.mode
-                            model.set(["fan": ["mode": item.mode]], delay: 0)
+                        HexRadio(label: item.label, selected: model.currentFan == item.mode, enabled: model.control.writable) {
+                            model.setFan(item.mode)
                         }
                     }
                 }
@@ -643,16 +696,16 @@ struct MenuContent: View {
             menuSection("Power Plan") {
                 HStack(spacing: 10) {
                     ForEach(powerItems, id: \.mode) { item in
-                        HexRadio(label: item.label, selected: model.config.nitroMode == item.mode) {
-                            model.config.nitroMode = item.mode
-                            model.set(["nitroMode": item.mode], delay: 0)
+                        HexRadio(label: item.label, selected: model.currentProfile == powerModes[item.mode], enabled: model.control.writable) {
+                            model.setPower(item.mode)
                         }
                     }
                 }
             }
-            SettingRow(label: "Battery charge limit (80%)", isOn: model.config.batteryLimit) {
-                model.config.batteryLimit = $0
-                model.set(["batteryLimit": $0], delay: 0)
+            HStack(spacing: 6) {
+                UnverifiedTag(help: unverifiedFirmwareHelp)
+                Text(model.control.blockedReason ?? "Fan and power controls not yet proven on this board")
+                    .font(.system(size: 10)).foregroundStyle(NS.dim)
             }
             Divider().overlay(Color(white: 0.25))
             HStack {
@@ -665,6 +718,7 @@ struct MenuContent: View {
         .frame(width: 330)
         .background(NS.bg)
         .preferredColorScheme(.dark)
+        .onAppear { model.requestTrustedRead() }
     }
 
     @ViewBuilder
@@ -679,14 +733,18 @@ struct MenuContent: View {
 struct MiniFan: View {
     let name: String
     let rpm: Int
-    let temp: Int
+    let temp: Int?
 
     var body: some View {
         VStack(spacing: 4) {
             FanDial(rpm: rpm, size: 84)
             HStack(spacing: 6) {
                 Text(name).font(.system(size: 11, weight: .medium)).foregroundStyle(NS.text)
-                Text("\(temp)°C").font(.system(size: 11)).foregroundStyle(tempColor(temp)).monospacedDigit()
+                if let temp {
+                    Text("\(temp)°C").font(.system(size: 11)).foregroundStyle(tempColor(temp)).monospacedDigit()
+                } else {
+                    Text("--°C").font(.system(size: 11)).foregroundStyle(NS.dim)
+                }
             }
         }
     }

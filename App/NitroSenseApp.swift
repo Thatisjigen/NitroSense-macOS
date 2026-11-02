@@ -155,30 +155,38 @@ final class NitroKeyWatcher {
 @MainActor
 func renderSnapshots(_ model: NitroModel, to dir: URL) {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    func variant(_ effect: String) -> NitroModel {
-        let m = NitroModel(preview: true)
-        m.config = model.config
-        m.config.led.effect = effect
-        m.snapshot = model.snapshot
-        m.connected = model.connected
-        return m
-    }
+    // The controls as they look with the nitrod, kext and SSDT of this build. A made-up reading, only to check the layout.
+    let ready = NitroModel(preview: true)
+    ready.snapshot = model.snapshot
+    ready.connected = true
+    ready.gpu = model.gpu
+    var reading = FirmwareReading()
+    reading.fanCPU = 1
+    reading.fanGPU = 1
+    reading.profile = 1
+    reading.batteryLimit = true
+    reading.keyboard = [0, 0, 5, 100, 0, 0, 255, 255, 255]
+    ready.control = ControlState(daemonKnowsControls: true, gamingWMI: true, modeState: nil, firmware: reading)
     let busy = NitroModel(preview: true)  // 5 min of made-up samples to check the hover tooltip
     busy.config = model.config
     busy.snapshot = model.snapshot
+    busy.gpu = model.gpu
     busy.history = (0..<150).map { i in
         let t = Double(i)
-        return Sample(date: Date().addingTimeInterval(Double(i - 150) * 2), cpuTemp: 60 + Int(15 * sin(t / 12)),
-                      gpuTemp: 43, cpuLoad: 30 + Int(25 * sin(t / 9)), cpuPower: 20 + 15 * sin(t / 10))
+        return Sample(date: Date().addingTimeInterval(Double(i - 150) * 2), cpuTemp: 60 + Int(15 * sin(t / 12)), gpuTemp: nil,
+                      cpuLoad: 30 + Int(25 * sin(t / 9)), cpuPower: 20 + 15 * sin(t / 10),
+                      rtxLoad: 25 + Int(20 * sin(t / 7)), irisLoad: 8 + Int(6 * sin(t / 5)))
     }
     let pages: [(String, AnyView, NitroModel)] = [
         ("monitoring-hover", AnyView(MonitoringPanel().frame(width: 680, height: 300)), busy),
         ("main", AnyView(MainView()), model),
-        ("lighting-static", AnyView(LightingPanel {}), variant("static")),
-        ("lighting-dynamic", AnyView(LightingPanel {}), variant("wave")),
-        ("curve", AnyView(CurvePanel {}), model),
+        ("main-ready", AnyView(MainView()), ready),
+        ("keyboard", AnyView(KeyboardPanel {}), model),
+        ("keyboard-ready", AnyView(KeyboardPanel {}), ready),
         ("settings", AnyView(SettingsMenu().background(Color(white: 0.16))), model),
+        ("settings-ready", AnyView(SettingsMenu().background(Color(white: 0.16))), ready),
         ("menu", AnyView(MenuContent()), model),
+        ("menu-ready", AnyView(MenuContent()), ready),
     ]
     for (name, view, m) in pages {
         let content = view
