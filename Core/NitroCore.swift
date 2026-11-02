@@ -91,7 +91,7 @@ final class NitroEC {
     }
 
     private func wmi(_ selector: NitroECSelector, _ name: String, _ opcode: UInt8, _ bytes: [UInt8]) throws -> [UInt8] {
-        if Reg.readOnlyModel { throw NitroECError(description: readOnlyMessage) }
+        if Reg.readOnlyModel && !isBatteryLimitCall(selector, opcode, bytes) { throw NitroECError(description: readOnlyMessage) }
         var input = [UInt8](repeating: 0, count: Int(kNitroECWMBHInSize))
         for (i, b) in bytes.prefix(input.count).enumerated() { input[i] = b }
         var scalar = UInt64(opcode)
@@ -106,6 +106,8 @@ final class NitroEC {
             throw NitroECError(description: "\(name) needs root: run with sudo")
         case kIOReturnNotPermitted:
             throw NitroECError(description: "kext refused \(name) 0x\(String(opcode, radix: 16)) (not whitelisted)")
+        case kIOReturnUnsupported:
+            throw NitroECError(description: "\(name) 0x\(String(opcode, radix: 16)): the loaded SSDT-NITRO has no WMEX method (the read-only SSDT of branch anv15-52?); see 'NitroEC Battery WMI' in ioreg -c NitroEC")
         default:
             throw NitroECError(description: "\(name) 0x\(String(opcode, radix: 16)) failed: 0x\(String(UInt32(bitPattern: kr), radix: 16))")
         }
@@ -126,11 +128,17 @@ final class NitroEC {
 //
 // From an EC dump decoded against this board's DSDT field names: five snapshots (idle on AC, 60 s load, after load, on battery, lid
 // closed). Only the fields below are understood. The fan mode, Nitro mode, keyboard LED, USB charge, keyboard
-// timeout and battery flags of the AN515-57 map are NOT identified on this board, so this branch is read-only: the
-// kext refuses every write, and the shared code below refuses them before asking the kext.
+// timeout and battery flags of the AN515-57 map are NOT identified on this board, so the EC is read-only on this branch:
+// the kext refuses every EC write and every gaming WMI call (WMBH), and the shared code below refuses them before asking
+// the kext. The one exception is the firmware battery-health WMI for the charge limit (Reg.batteryLimitWMI).
 enum Reg {
     static let model = "ANV15-52"
     static let readOnlyModel = true
+    // Branch anv15-52-battery: the one firmware call that may pass, the battery-health WMI (\_SB.PC00.WMID.WMBE, GUID
+    // 79772EC5-04B1-4BFD-843C-61E7F77B6CC9, the one Acer's NitroSense uses on Windows for the 80 % charge limit):
+    // 0x14 reads the status with [battery 1, query 1], 0x15 sets it with [battery 1, mask 1 (limit), 0|1]. Same shape
+    // as the kext whitelist (NitroEC.cpp, isWMBEAllowed). Set by hand with nitroctl only: nitrod never applies it.
+    static let batteryLimitWMI = true
     static let cpuTemp: Int = 0x58        // CTMP, °C (50 idle, 97 under load, like Linux acpitz)
     static let gpuTemp: Int = 0x59        // GTMP, °C (name from the DSDT; which sensor it is was not verified)
     static let sysTemp: Int = 0x51        // ETP1, °C (45-62 in the dump; sensor unverified)
@@ -153,7 +161,17 @@ enum Reg {
     static let batteryStatus = unknown
 }
 func be16(_ ec: [UInt8], _ at: Int) -> Int { Int(ec[at]) << 8 | Int(ec[at + 1]) }
-let readOnlyMessage = "read-only on the \(Reg.model): the fan and mode bytes of this EC are not identified yet (branch anv15-52)"
+let readOnlyMessage = "read-only on the \(Reg.model): the fan and mode bytes of this EC are not identified yet (branch anv15-52-battery writes only the battery charge limit, through the firmware WMI)"
+
+// The only call that passes the read-only gate of this branch: see Reg.batteryLimitWMI.
+func isBatteryLimitCall(_ selector: NitroECSelector, _ opcode: UInt8, _ bytes: [UInt8]) -> Bool {
+    guard Reg.batteryLimitWMI, selector.rawValue == kNitroECSelWMBE.rawValue, bytes.count >= 2, bytes[0] == 1, bytes[1] == 1 else { return false }
+    switch opcode {
+    case 0x14: return bytes.count == 2
+    case 0x15: return bytes.count == 3 && bytes[2] <= 1
+    default: return false
+    }
+}
 
 func hex(_ v: UInt8) -> String { String(format: "0x%02X", v) }
 

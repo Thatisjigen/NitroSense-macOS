@@ -156,7 +156,8 @@ do {
             try setBatteryLimit(ec, args[2] == "on")
         }
         let (on, raw) = try batteryLimitStatus(ec)
-        print("80% charge limit: \(on ? "on" : "off")   (reply \(raw.map { hex($0) }.joined(separator: " ")), EC 0x03 = \(hex(try ec.readByte(0x03))))")
+        // ANV15-52: no EC byte is known to mirror the limit (0x03 is an AN515-57 field), so only the firmware reply is shown.
+        print("80% charge limit: \(on ? "on" : "off")   (WMBE 0x14 reply \(raw.map { hex($0) }.joined(separator: " ")))")
     case "usb-charge", "kb-timeout":
         guard args.count == 2, ["on", "off"].contains(args[1]) else {
             print(usage)

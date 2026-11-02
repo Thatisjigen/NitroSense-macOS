@@ -1,13 +1,17 @@
-> **Branch `anv15-52` — Acer Nitro V 15 ANV15-52 (i9-13900H, RTX 5050), first version, read-only.**
+> **Branch `anv15-52-battery` — Acer Nitro V 15 ANV15-52 (i9-13900H, RTX 5050): read-only EC, plus the battery charge limit.**
 > The EC window of this board is at `0xFE708500` (the SSDT of this branch) and its field map differs from the
 > AN515-57's: so far only temperatures (`CTMP` 0x58, `GTMP` 0x59, `ETP1..6`), fan speeds (`CPUF` 0x5C, `GPUF` 0x6A,
 > 16-bit big-endian), AC (0x40 bit 0), lid (0x4C bit 6), power limits (`PL1` 0x14, `PL2` 0x16, tenths of a watt) and the
 > keyboard backlight bit (0x48) are identified, from an EC dump taken under Linux in five states.
-> The fan-mode, Nitro-mode, LED, charge and timeout bytes are not identified, so **nothing is written**: the SSDT
-> exports no write method, `NitroEC.kext` refuses every write and WMI call, `nitroctl`'s write commands fail with a
-> message and `nitrod` applies nothing (it still serves `status`). `nitroctl status`, `dump`, `read`, `watch` and the
-> app's monitoring work. Writes come back only after the Windows NitroSense snapshots (Quiet/Balance/Extreme) give the
-> mode and fan bytes a meaning. Everything below describes the upstream AN515-57 version.
+> The fan-mode, Nitro-mode, LED, charge and timeout bytes are not identified, so **the EC is never written**: the SSDT
+> exports no EC write method and no gaming WMI wrapper, `NitroEC.kext` refuses every EC write and every `WMBH` call,
+> `nitroctl`'s other write commands fail with a message and `nitrod` applies nothing (it still serves `status`).
+> **The one thing this branch writes is the 80 % battery charge limit**, through the firmware's battery-health WMI
+> (`WMBE` 0x14 read / 0x15 write, the GUID Acer's NitroSense uses on Windows, which this board's SSDT10 implements like
+> the AN515-57's): `sudo nitroctl battery limit status|on|off`, by hand only; `nitrod` does not re-apply it at start or
+> wake and refuses it over its socket. `nitroctl status`, `dump`, `read`, `watch` and the app's monitoring work. The
+> other writes come back only after the Windows NitroSense snapshots (Quiet/Balance/Extreme) give the mode and fan
+> bytes a meaning. Everything below describes the upstream AN515-57 version.
 
 # NitroSense for macOS
 

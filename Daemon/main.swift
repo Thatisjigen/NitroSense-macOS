@@ -118,6 +118,8 @@ final class Daemon {
 
     // Everything the firmware forgets across boot/sleep. Each step is independent.
     func applyAll(reason: String) {
+        // Branch anv15-52-battery: nothing is re-applied at start, wake or SIGHUP, the battery limit included; the firmware
+        // keeps that one by itself and the user sets it by hand with 'sudo nitroctl battery limit on|off'.
         if Reg.readOnlyModel { log("apply (\(reason)): skipped, \(readOnlyMessage)"); return }
         log("apply (\(reason))")
         step("psee") { try setPSEE(ec, true) }
@@ -263,13 +265,16 @@ final class Daemon {
                 return ["ok": false, "error": "set needs a config object"]
             }
             do {
+                if Reg.readOnlyModel, let wanted = patch["batteryLimit"] as? Bool, wanted != config.batteryLimit {
+                    return ["ok": false, "error": "nitrod does not write on the \(Reg.model): set the charge limit with 'sudo nitroctl battery limit on|off'"]
+                }
                 let next = try config.merged(with: patch)
                 try next.validate()
                 let old = config
                 config = next
                 save()
                 if old.nitroMode != next.nitroMode { step("mode") { try setNitroMode(ec, next.nitroMode) } }
-                if old.batteryLimit != next.batteryLimit { step("battery limit") { try setBatteryLimit(ec, next.batteryLimit) } }
+                // batteryLimit changes are refused above on this branch: nitrod has no write path to the firmware.
                 if old.usbCharge != next.usbCharge { step("usb charge") { try setUSBCharge(ec, next.usbCharge) } }
                 if old.kbTimeout != next.kbTimeout { step("kb timeout") { try setKBTimeout(ec, next.kbTimeout) } }
                 if old.led != next.led { step("led") { try applyLEDConfig() } }
