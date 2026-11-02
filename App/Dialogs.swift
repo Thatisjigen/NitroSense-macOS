@@ -1,4 +1,5 @@
-// Overlay dialogs: Keyboard Lighting (as in NitroSense) and the fan curve editor.
+// Overlay dialogs: the keyboard backlight, read only on this model, and the fan curve editor, which nothing opens on this
+// branch (no manual duty on this board yet).
 
 import SwiftUI
 
@@ -36,244 +37,53 @@ struct DialogFrame<Content: View>: View {
     }
 }
 
-// MARK: - Keyboard Lighting
+// MARK: - Keyboard backlight (ANV15-52: single colour)
 
-let dynamicEffects = ["breathing", "wave", "zoom", "meteor", "shifting", "neon", "twinkling"]
-let basicColors = ["FF0000", "FF8000", "FFFF00", "00FF00", "00C0C0", "0000FF", "FF00FF", "8000FF", "FFFFFF"]
-
-struct LightingPanel: View {
+// This keyboard has one colour: on, off and variable brightness, driven by the Fn keys through the EC. So there are no
+// zones, colours or effects here, and no control either: the firmware declares SetGamingKBBacklight (WMBH 0x14), but
+// nothing shows what it does on a single-colour keyboard, so only what can be read is shown.
+struct KeyboardPanel: View {
     @Environment(NitroModel.self) private var model
     let close: () -> Void
 
     var body: some View {
-        let led = model.config.led
-        let isStatic = led.effect == "static"
-        DialogFrame(title: "Keyboard  Lighting", close: close) {
-            HStack(spacing: 22) {
-                HexRadio(label: "Static", selected: isStatic) { setLED(["effect": "static"]) { $0.effect = "static" } }
-                HexRadio(label: "Dynamic", selected: !isStatic) {
-                    if isStatic {
-                        let effect = UserDefaults.standard.string(forKey: "lastDynamicEffect") ?? "wave"
-                        setLED(["effect": effect]) { $0.effect = effect }
-                    }
+        let on = model.snapshot.keyboardBit
+        DialogFrame(title: "Keyboard  Backlight", close: close) {
+            Text("This keyboard is single-colour: on, off and variable brightness. The Fn keys drive it; this panel only reads.")
+                .font(.system(size: 12)).foregroundStyle(Color(white: 0.8))
+            KeyboardDrawing(colors: Array(repeating: Color(white: 0.95), count: 4), brightness: on ? 100 : 0)
+                .frame(height: 190)
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.07)))
+            VStack(alignment: .leading, spacing: 8) {
+                row("Backlight bit", on ? "On" : "Off", "KBBL, EC 0x48 bit 0") {
+                    UnverifiedTag(help: "The firmware reports this bit with the keyboard-light hotkey event, but it has never been seen at 0: check that it follows the Fn key.")
                 }
-                Spacer()
-                Image(systemName: "sun.min").foregroundStyle(NS.dim)
-                RedSlider(value: Double(led.brightness), range: 0...100, step: 5) { v in
-                    setLED(["brightness": Int(v)]) { $0.brightness = Int(v) }
+                row("Brightness level", "not exposed", "no EC byte identified yet: 'nitroctl ecdiff' finds it when the Fn key is pressed") { EmptyView() }
+                row("Firmware report", firmwareText, "GetGamingKBBacklight, WMBH 0x15, read through nitrod") {
+                    NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: model.control.writable) { model.readFirmware() }
+                        .help(model.control.blockedReason ?? "Asks the firmware through nitrod: one SMI per call")
                 }
-                .frame(width: 150)
-                Image(systemName: "sun.max.fill").foregroundStyle(NS.text)
-            }
-            VStack(spacing: 12) {
-                if isStatic {
-                    KeyboardDrawing(colors: led.zones.map { Color(hexRGB: $0) }, brightness: led.brightness)
-                        .frame(height: 210)
-                    ZoneRow()
-                } else {
-                    DynamicControls()
-                }
-            }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.07)))
-            HStack(spacing: 10) {
-                HexToggle(isOn: model.config.kbTimeout) { on in
-                    model.config.kbTimeout = on
-                    model.set(["kbTimeout": on], delay: 0)
-                }
-                Text("Backlight off after 30 seconds").font(.system(size: 12)).foregroundStyle(Color(white: 0.8))
-                Spacer()
             }
         }
     }
 
-    private func setLED(_ patch: [String: Any], _ local: (inout LEDConfig) -> Void) {
-        local(&model.config.led)
-        model.set(["led": patch], delay: 0)
+    private var firmwareText: String {
+        guard let firmware = model.control.firmware else { return model.control.blockedReason ?? "not read yet" }
+        guard let k = firmware.keyboard, k.count >= 4 else { return "no answer" }
+        return "brightness byte \(k[3]), mode \(k[1])   raw \(k.prefix(9).map { String(format: "%02X", $0) }.joined(separator: " "))"
     }
-}
 
-struct ZoneRow: View {
-    @Environment(NitroModel.self) private var model
-    @AppStorage("zoneMemory") private var zoneMemory = "FF0000,00FF00,0000FF,FFFFFF"
-
-    var body: some View {
-        let zones = model.config.led.zones
-        HStack(spacing: 0) {
-            ForEach(0..<4, id: \.self) { i in
-                if i > 0 { Rectangle().fill(Color(white: 0.25)).frame(width: 1, height: 50) }
-                VStack(spacing: 10) {
-                    Text("Zone \(i + 1)").font(.system(size: 12)).foregroundStyle(NS.dim)
-                    HStack(spacing: 12) {
-                        HexToggle(isOn: zones[i] != "000000") { on in
-                            var memory = zoneMemory.split(separator: ",").map(String.init)
-                            if memory.count != 4 { memory = ["FF0000", "00FF00", "0000FF", "FFFFFF"] }
-                            if on {
-                                setZone(i, memory[i] == "000000" ? "FFFFFF" : memory[i])
-                            } else {
-                                memory[i] = zones[i]
-                                zoneMemory = memory.joined(separator: ",")
-                                setZone(i, "000000")
-                            }
-                        }
-                        ColorSwatchButton(hex: zones[i]) { setZone(i, $0) }
-                    }
-                }
-                .frame(maxWidth: .infinity)
+    private func row<Tag: View>(_ label: String, _ value: String, _ note: String, @ViewBuilder tag: () -> Tag) -> some View {
+        HStack(spacing: 10) {
+            Text(label).font(.system(size: 12)).foregroundStyle(NS.dim).frame(width: 120, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(value).font(.system(size: 12)).foregroundStyle(NS.text).monospacedDigit()
+                Text(note).font(.system(size: 10)).foregroundStyle(NS.dim)
             }
+            Spacer()
+            tag()
         }
-    }
-
-    private func setZone(_ i: Int, _ hex: String) {
-        model.config.led.zones[i] = hex
-        model.set(["led": ["zones": model.config.led.zones]], delay: 0.3)
-    }
-}
-
-// Little square swatch with a folded corner; opens the colour palette.
-struct ColorSwatchButton: View {
-    let hex: String
-    let pick: (String) -> Void
-    @State private var open = false
-
-    var body: some View {
-        Button { open.toggle() } label: {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color(hexRGB: hex == "000000" ? "333333" : hex))
-                .frame(width: 18, height: 18)
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "pencil").font(.system(size: 7, weight: .bold)).foregroundStyle(.white)
-                        .padding(1).background(Color.black.opacity(0.5))
-                }
-                .overlay(RoundedRectangle(cornerRadius: 2).stroke(Color(white: 0.6), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $open, arrowEdge: .bottom) {
-            ColorPalette(selected: hex) { pick($0) }
-                .padding(10)
-                .preferredColorScheme(.dark)
-        }
-    }
-}
-
-// Basic colours, recent colours and "More color..." (system picker).
-struct ColorPalette: View {
-    let selected: String
-    let pick: (String) -> Void
-    var horizontal = false
-    @AppStorage("recentColors") private var recentRaw = ""
-
-    var body: some View {
-        let recent = recentRaw.split(separator: ",").map(String.init)
-        let layout = horizontal ? AnyLayout(HStackLayout(alignment: .bottom, spacing: 24)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-        layout {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Basic colors").font(.system(size: 11)).foregroundStyle(NS.dim)
-                swatches(basicColors)
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Recent colors").font(.system(size: 11)).foregroundStyle(NS.dim)
-                swatches(Array(recent.prefix(9)) + Array(repeating: "", count: max(0, 9 - recent.count)))
-            }
-            ColorPicker(selection: Binding(
-                get: { Color(hexRGB: selected) },
-                set: { choose($0.hexRGB) }
-            ), supportsOpacity: false) {
-                Text("More color...").font(.system(size: 11)).foregroundStyle(NS.text)
-            }
-        }
-    }
-
-    private func swatches(_ hexes: [String]) -> some View {
-        HStack(spacing: 5) {
-            ForEach(Array(hexes.enumerated()), id: \.offset) { _, hex in
-                Button { if !hex.isEmpty { choose(hex) } } label: {
-                    Rectangle()
-                        .fill(hex.isEmpty ? Color.clear : Color(hexRGB: hex))
-                        .frame(width: 16, height: 16)
-                        .overlay(Rectangle().stroke(hex == selected ? NS.text : Color(white: 0.45), lineWidth: hex == selected ? 2 : 1))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private func choose(_ hex: String) {
-        var recent = recentRaw.split(separator: ",").map(String.init).filter { $0 != hex }
-        if !basicColors.contains(hex) { recent.insert(hex, at: 0) }
-        recentRaw = recent.prefix(9).joined(separator: ",")
-        pick(hex)
-    }
-}
-
-struct DynamicControls: View {
-    @Environment(NitroModel.self) private var model
-
-    var body: some View {
-        let led = model.config.led
-        VStack(alignment: .leading, spacing: 14) {
-            KeyboardDrawing(colors: Array(repeating: Color(hexRGB: led.color), count: 4), brightness: led.brightness,
-                            badge: effectNames[led.effect])
-                .frame(height: 150)
-            Text("Light Effects").font(.system(size: 12)).foregroundStyle(NS.dim)
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(130), alignment: .leading), count: 4), alignment: .leading, spacing: 10) {
-                ForEach(dynamicEffects, id: \.self) { effect in
-                    HexRadio(label: effectNames[effect] ?? effect, selected: led.effect == effect) {
-                        UserDefaults.standard.set(effect, forKey: "lastDynamicEffect")
-                        model.config.led.effect = effect
-                        model.set(["led": ["effect": effect]], delay: 0)
-                    }
-                }
-            }
-            HStack(alignment: .top, spacing: 50) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Speed").font(.system(size: 12)).foregroundStyle(NS.dim)
-                    RedSlider(value: Double(led.speed), range: 1...9, step: 1) { v in
-                        model.config.led.speed = Int(v)
-                        model.set(["led": ["speed": Int(v)]], delay: 0)
-                    }
-                    .frame(width: 160)
-                    HStack {
-                        Text("-"); Spacer(); Text("+")
-                    }
-                    .font(.system(size: 10)).foregroundStyle(NS.dim).frame(width: 160)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Direction").font(.system(size: 12)).foregroundStyle(NS.dim)
-                    HStack(spacing: 6) {
-                        DirectionButton(icon: "arrow.left", selected: led.direction != 2) { setDirection(1) }
-                        DirectionButton(icon: "arrow.right", selected: led.direction == 2) { setDirection(2) }
-                    }
-                }
-            }
-            ColorPalette(selected: led.color, pick: { hex in
-                model.config.led.color = hex
-                model.set(["led": ["color": hex]], delay: 0.3)
-            }, horizontal: true)
-        }
-    }
-
-    private func setDirection(_ d: Int) {
-        model.config.led.direction = d
-        model.set(["led": ["direction": d]], delay: 0)
-    }
-}
-
-struct DirectionButton: View {
-    let icon: String
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundStyle(selected ? NS.red : NS.dim)
-                .frame(width: 34, height: 24)
-                .background(RoundedRectangle(cornerRadius: 3).fill(Color(white: selected ? 0.2 : 0.14)))
-                .overlay(RoundedRectangle(cornerRadius: 3).stroke(selected ? NS.red.opacity(0.7) : Color(white: 0.28), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -364,7 +174,7 @@ struct CurvePanel: View {
             Text("Used when Fan Control is set to Curve. Fan speed (%) by temperature (°C); fans go to max at \(fan.failsafeTemp) °C regardless.")
                 .font(.system(size: 11)).foregroundStyle(NS.dim)
             HStack(alignment: .top, spacing: 14) {
-                CurveGraph(curve: curve, cpuTemp: model.snapshot.cpuTemp, gpuTemp: fan.curveGPU ? model.snapshot.gpuTemp : nil)
+                CurveGraph(curve: curve, cpuTemp: model.snapshot.cpuTemp, gpuTemp: fan.curveGPU ? model.gpuTemp : nil)
                     .frame(height: 220)
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(curve.indices, id: \.self) { i in
@@ -396,7 +206,6 @@ struct CurvePanel: View {
             HStack {
                 SettingRow(label: "Also drive the GPU fan", isOn: fan.curveGPU) {
                     model.config.fan.curveGPU = $0
-                    model.set(["fan": ["curveGPU": $0]], delay: 0)
                 }
                 .frame(width: 250)
                 Text("(off: GPU fan stays on Auto, quieter)").font(.system(size: 11)).foregroundStyle(NS.dim)
@@ -415,7 +224,6 @@ struct CurvePanel: View {
             try test.validate()
             error = nil
             model.config.fan.curve = curve
-            model.set(["fan": ["curve": curve.map { ["temp": $0.temp, "percent": $0.percent] }]], delay: 0)
         } catch {
             self.error = "\(error)"
         }
