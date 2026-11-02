@@ -765,6 +765,7 @@ struct MenuBarLabel: View {
 
 struct MenuContent: View {
     @Environment(NitroModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         let s = model.snapshot
@@ -823,6 +824,7 @@ struct MenuContent: View {
             model.requestTrustedRead()
             model.sampleRTXNow()
         }
+        .onReceive(NotificationCenter.default.publisher(for: AppDelegate.closeMenuNotification)) { _ in dismiss() }
     }
 
     @ViewBuilder

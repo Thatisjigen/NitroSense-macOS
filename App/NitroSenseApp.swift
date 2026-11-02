@@ -22,6 +22,7 @@ struct NitroSenseApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static private(set) weak var shared: AppDelegate?
+    static let closeMenuNotification = Notification.Name("NitroSenseCloseMenu")
     let model: NitroModel
     private var window: NSWindow?
     private var nitroKey: NitroKeyWatcher?
@@ -77,6 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func showMainWindow() {
+        // The menu bar panel stays open otherwise, whichever way the window was opened.
+        NotificationCenter.default.post(name: AppDelegate.closeMenuNotification, object: nil)
         if window == nil {
             let host = NSHostingController(rootView: MainView().environment(model))
             host.sizingOptions = [.preferredContentSize]
