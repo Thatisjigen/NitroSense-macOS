@@ -694,6 +694,15 @@ struct MiniFan: View {
 
 // MARK: - Snapshot support (ImageRenderer cannot draw ScrollView content)
 
+// Written out by hand instead of SwiftUI's @Entry macro: the macro needs the SwiftUIMacros plugin that only
+// Xcode ships, and this fork is built with the Command Line Tools alone.
+private struct SnapshotModeKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
-    @Entry var snapshotMode = false
+    var snapshotMode: Bool {
+        get { self[SnapshotModeKey.self] }
+        set { self[SnapshotModeKey.self] = newValue }
+    }
 }
