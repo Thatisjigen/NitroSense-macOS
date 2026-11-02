@@ -7,6 +7,7 @@
 #define kNitroECACPIVersion   4
 #define kNitroECWMBHInSize    16
 #define kNitroECWMBHOutSize   16
+#define kNitroECModeStateSize 44
 
 enum NitroECSelector {
     kNitroECSelReadByte = 0,  // in: scalar[0] = offset       out: scalar[0] = value
@@ -16,6 +17,8 @@ enum NitroECSelector {
     kNitroECSelWMBH     = 3,  // in: scalar[0] = opcode, struct[16] = WMBH buffer
                               // out: struct[<=16] = WMBH result. root only, opcode whitelist
     kNitroECSelWMBE     = 4,  // same shape as WMBH, for the battery-health WMI (WMBE)
+    kNitroECSelModeState = 5, // out: struct[44] = TUGM, CCOL, IDPF, 0, then the M1..M5 mode tables: firmware fields,
+                              // read only, no SMI, no root (needs an SSDT-NITRO with RMOD)
     kNitroECSelCount
 };
 

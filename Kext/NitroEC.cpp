@@ -10,21 +10,16 @@
 OSDefineMetaClassAndStructors(NitroEC, IOService)
 OSDefineMetaClassAndStructors(NitroECUserClient, IOUserClient)
 
-// MARK: - Write policy (ANV15-52 branch): EC read-only, battery-limit WMI only
+// MARK: - Write policy (ANV15-52 branch): EC read-only, exact firmware WMI calls only
 //
-// The EC map of the Acer Nitro V 15 ANV15-52 (ERAM at 0xFE708500) is known only for temperatures, fan speeds, AC, lid,
-// power limits and the keyboard backlight (an EC dump decoded against the DSDT field names); the fan,
-// mode, LED and charge bytes of the AN515-57 whitelist do not apply here and their counterparts are not identified.
-// Until they are, every EC byte write and every gaming WMI call (WMBH) is refused, and the SSDT of this branch exports
-// neither WE1B nor WMBX.
+// No byte of the EC is written from here: the SSDT of this branch has no WE1B, writeByte refuses and isWriteAllowed is
+// false. The mode and fan bytes of the AN515-57 whitelist do not apply on this board (ERAM at 0xFE708500).
 //
-// The one firmware call allowed is the battery-health WMI (\_SB.PC00.WMID.WMBE, GUID
-// 79772EC5-04B1-4BFD-843C-61E7F77B6CC9), which Acer's NitroSense uses on Windows for the 80 % charge limit and which
-// SSDT10 of this board implements like the AN515-57's (both ids go to the firmware SMI; 0x15 also notifies BAT1). The
-// whitelist is upstream's: 0x14 reads the status, 0x15 sets the limit mask only (calibration stays out).
-
-bool NitroEC::isWriteAllowed(uint32_t, uint32_t) { return false; }
-bool NitroEC::isWMBHAllowed(uint32_t, const uint8_t *) { return false; }
+// The firmware calls allowed are the ones below, with these exact buffers and nothing else. All of them go to the
+// firmware SMI (SSDT10, WMBE and WMBH); the IDs and types are in the MOF of this firmware (WQAB in SSDT10), the layouts
+// come from Linux's acer-wmi (fan behaviour, misc settings) and Linuwu-Sense (battery health, keyboard backlight) on
+// other Acer models. What the SMM handler does with them cannot be read from ACPI: every reply carries a status byte,
+// which the clients check, and each write has a GET to read it back with.
 
 // Battery-health WMI (\_SB.PC00.WMID.WMBE), all forwarded to BIOS SMM.
 // Layout from Linuwu-Sense: get [battery 1, query 1], set [battery 1, mask, status].
@@ -34,11 +29,50 @@ enum : uint32_t {
     kHealthMaskLimit = 0x01,  // 80 % charge limit. Calibration (0x02) is deliberately not allowed.
 };
 
+// Gaming WMI (\_SB.PC00.WMID.WMBH), forwarded to BIOS SMM.
+enum : uint32_t {
+    kWMBHSetFanBehavior = 0x0E,  // SetGamingFanBehavior, uint64: bits 15:0 fan bitmap, 17:16 CPU mode, 23:22 GPU mode
+    kWMBHGetFanBehavior = 0x0F,  // GetGamingFanBehavior, uint32 fan bitmap
+    kWMBHGetKBBacklight = 0x15,  // GetGamingKBBacklight, uint32 1. Read only: SetGamingKBBacklight (0x14) is not allowed.
+    kWMBHSetMisc        = 0x16,  // SetGamingMiscSetting, uint64: byte 0 index, byte 1 value; the firmware then runs HIDB
+    kWMBHGetMisc        = 0x17,  // GetGamingMiscSetting, uint32 index
+
+    kFanCPU = 0x01, kFanGPU = 0x08, kFanBoth = kFanCPU | kFanGPU,
+    // Third byte of the uint64: both fans in Auto (mode 1, 0x410009) or in Max (mode 2, firmware "turbo", 0x820009).
+    // Custom (mode 3) and SetGamingFanSpeed (0x10) stay out: manual duty could park a fan.
+    kFanAutoByte = 0x41, kFanMaxByte = 0x82,
+
+    kMiscSupportedProfiles = 0x0A,  // read only
+    kMiscPlatformProfile   = 0x0B,
+    // The values CCOL takes in _Q30 of this DSDT: 0 quiet, 1 balanced, 4 performance. Turbo (5) and eco (6) stay out.
+    kProfileQuiet = 0x00, kProfileBalanced = 0x01, kProfilePerformance = 0x04,
+};
+
 static bool isZeroFrom(const uint8_t *in, uint32_t start) {
     for (uint32_t i = start; i < kNitroECWMBHInSize; i++)
         if (in[i])
             return false;
     return true;
+}
+
+bool NitroEC::isWriteAllowed(uint32_t, uint32_t) { return false; }
+
+bool NitroEC::isWMBHAllowed(uint32_t opcode, const uint8_t *in) {
+    switch (opcode) {
+    case kWMBHSetFanBehavior:
+        return in[0] == kFanBoth && in[1] == 0 && (in[2] == kFanAutoByte || in[2] == kFanMaxByte) && isZeroFrom(in, 3);
+    case kWMBHGetFanBehavior:
+        return (in[0] == kFanCPU || in[0] == kFanGPU) && isZeroFrom(in, 1);
+    case kWMBHGetKBBacklight:
+        return in[0] == 1 && isZeroFrom(in, 1);
+    case kWMBHSetMisc:
+        return in[0] == kMiscPlatformProfile &&
+               (in[1] == kProfileQuiet || in[1] == kProfileBalanced || in[1] == kProfilePerformance) && isZeroFrom(in, 2);
+    case kWMBHGetMisc:
+        return (in[0] == kMiscPlatformProfile || in[0] == kMiscSupportedProfiles) && isZeroFrom(in, 1);
+    default:
+        return false;
+    }
 }
 
 bool NitroEC::isWMBEAllowed(uint32_t method, const uint8_t *in) {
@@ -76,21 +110,36 @@ bool NitroEC::start(IOService *provider) {
 
     acpi->retain();
 
-    // The read-only SSDT of branch anv15-52 reports the same VERS but has no WMEX: then WMBE is refused, not evaluated.
+    // The SSDTs of the older branches report the same VERS but lack these methods (anv15-52 has none, anv15-52-battery has
+    // only WMEX): what is missing is refused, not evaluated.
     hasWMEX = acpi->validateObject("WMEX") == kIOReturnSuccess;
+    hasWMBX = acpi->validateObject("WMBX") == kIOReturnSuccess;
+    hasRMOD = acpi->validateObject("RMOD") == kIOReturnSuccess;
 
     uint8_t cpuTemp = 0;
     if (readByte(0x58, &cpuTemp) == kIOReturnSuccess)   // CTMP on the ANV15-52
-        LOG("started, SSDT v%u, CPU temp %u C, battery WMI %s", version, cpuTemp, hasWMEX ? "available" : "absent (no WMEX)");
+        LOG("started, SSDT v%u, CPU temp %u C, battery WMI %s, gaming WMI %s", version, cpuTemp,
+            hasWMEX ? "available" : "absent (no WMEX)", hasWMBX ? "available" : "absent (no WMBX)");
 
     setProperty("NitroEC SSDT Version", version, 32);
     setProperty("NitroEC Battery WMI", hasWMEX);
+    setProperty("NitroEC Gaming WMI", hasWMBX);
+    setProperty("NitroEC Mode State", hasRMOD);
     registerService();
     return true;
 }
 
 void NitroEC::stop(IOService *provider) {
-    // Nothing to put back: this branch never writes to the EC.
+    // The EC is never written. The one thing to put back: if a call through this kext took the fans away from Auto and
+    // no later call brought them back, never leave them that way without a driver behind them. Otherwise the firmware
+    // is not touched here.
+    if (fanLeftOffAuto && hasWMBX) {
+        uint8_t in[kNitroECWMBHInSize] = {kFanBoth, 0, kFanAutoByte};
+        uint8_t out[kNitroECWMBHOutSize] = {};
+        uint32_t outLength = sizeof(out);
+        LOG("stop: fans back to Auto");
+        callWMI("WMBX", kWMBHSetFanBehavior, in, out, &outLength);
+    }
     OSSafeReleaseNULL(acpi);
     IOService::stop(provider);
 }
@@ -127,26 +176,37 @@ IOReturn NitroEC::readByte(uint32_t offset, uint8_t *value) {
     return kIOReturnSuccess;
 }
 
-IOReturn NitroEC::dump(uint8_t *buffer, uint32_t length) {
-    if (!buffer || length < kNitroECDumpSize)
-        return kIOReturnBadArgument;
-
+IOReturn NitroEC::readBuffer(const char *method, uint8_t *buffer, uint32_t size) {
     OSObject *result = nullptr;
     IOLockLock(lock);
-    IOReturn ret = acpi->evaluateObject("RDMP", &result);
+    IOReturn ret = acpi->evaluateObject(method, &result);
     IOLockUnlock(lock);
     if (ret != kIOReturnSuccess)
         return ret;
 
     OSData *data = OSDynamicCast(OSData, result);
-    if (!data || data->getLength() < kNitroECDumpSize) {
+    if (!data || data->getLength() < size) {
         OSSafeReleaseNULL(result);
         return kIOReturnUnderrun;
     }
 
-    memcpy(buffer, data->getBytesNoCopy(), kNitroECDumpSize);
+    memcpy(buffer, data->getBytesNoCopy(), size);
     result->release();
     return kIOReturnSuccess;
+}
+
+IOReturn NitroEC::dump(uint8_t *buffer, uint32_t length) {
+    if (!buffer || length < kNitroECDumpSize)
+        return kIOReturnBadArgument;
+    return readBuffer("RDMP", buffer, kNitroECDumpSize);
+}
+
+IOReturn NitroEC::modeState(uint8_t *buffer, uint32_t length) {
+    if (!buffer || length < kNitroECModeStateSize)
+        return kIOReturnBadArgument;
+    if (!hasRMOD)
+        return kIOReturnUnsupported;
+    return readBuffer("RMOD", buffer, kNitroECModeStateSize);
 }
 
 IOReturn NitroEC::writeByte(uint32_t offset, uint32_t value) {
@@ -154,9 +214,23 @@ IOReturn NitroEC::writeByte(uint32_t offset, uint32_t value) {
     return kIOReturnNotPermitted;
 }
 
-IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *, uint32_t *) {
-    LOG("refused WMBH 0x%02X [%02X %02X] (read-only on the ANV15-52)", opcode, in[0], in[1]);
-    return kIOReturnNotPermitted;
+IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
+    if (!isWMBHAllowed(opcode, in)) {
+        LOG("refused WMBH 0x%02X [%02X %02X %02X] (not whitelisted)", opcode, in[0], in[1], in[2]);
+        return kIOReturnNotPermitted;
+    }
+    if (!hasWMBX) {
+        LOG("refused WMBH 0x%02X: the loaded SSDT-NITRO has no WMBX", opcode);
+        return kIOReturnUnsupported;
+    }
+    // Set before the call: if Max fails half way the state is unknown, and stop() should still ask for Auto.
+    bool fanWrite = opcode == kWMBHSetFanBehavior;
+    if (fanWrite && in[2] == kFanMaxByte)
+        fanLeftOffAuto = true;
+    IOReturn ret = callWMI("WMBX", opcode, in, out, outLength);
+    if (fanWrite && in[2] == kFanAutoByte && ret == kIOReturnSuccess && *outLength > 0 && out[0] == 0)
+        fanLeftOffAuto = false;
+    return ret;
 }
 
 IOReturn NitroEC::callWMBE(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
@@ -217,6 +291,7 @@ const IOExternalMethodDispatch NitroECUserClient::methods[kNitroECSelCount] = {
     [kNitroECSelWriteByte] = {&NitroECUserClient::sWriteByte, 2, 0, 1, 0},
     [kNitroECSelWMBH]      = {&NitroECUserClient::sWMBH, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
     [kNitroECSelWMBE]      = {&NitroECUserClient::sWMBE, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
+    [kNitroECSelModeState] = {&NitroECUserClient::sModeState, 0, 0, 0, kNitroECModeStateSize},
 };
 
 bool NitroECUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type) {
@@ -261,6 +336,13 @@ IOReturn NitroECUserClient::sDump(OSObject *target, void *, IOExternalMethodArgu
     if (args->structureOutputSize < kNitroECDumpSize)
         return kIOReturnBadArgument;
     return self->owner->dump(static_cast<uint8_t *>(args->structureOutput), kNitroECDumpSize);
+}
+
+IOReturn NitroECUserClient::sModeState(OSObject *target, void *, IOExternalMethodArguments *args) {
+    auto self = static_cast<NitroECUserClient *>(target);
+    if (args->structureOutputSize < kNitroECModeStateSize)
+        return kIOReturnBadArgument;
+    return self->owner->modeState(static_cast<uint8_t *>(args->structureOutput), kNitroECModeStateSize);
 }
 
 IOReturn NitroECUserClient::sWriteByte(OSObject *target, void *, IOExternalMethodArguments *args) {
