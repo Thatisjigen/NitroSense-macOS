@@ -6,12 +6,14 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 
-// Matches \_SB.NTRO (_HID "NTRO0001") from SSDT-NITRO and exposes EC RAM reads. Branch anv15-52: reads only.
+// Matches \_SB.NTRO (_HID "NTRO0001") from SSDT-NITRO and exposes EC RAM reads. Branch anv15-52-battery: EC reads
+// only, plus the two battery-limit calls of the firmware battery-health WMI (WMBE 0x14 / 0x15).
 class NitroEC : public IOService {
     OSDeclareDefaultStructors(NitroEC)
 
     IOACPIPlatformDevice *acpi {nullptr};
     IOLock *lock {nullptr};
+    bool hasWMEX {false};   // the loaded SSDT-NITRO exports WMEX (the read-only SSDT of branch anv15-52 does not)
 
 public:
     bool start(IOService *provider) override;
@@ -28,6 +30,8 @@ public:
     static bool isWMBHAllowed(uint32_t opcode, const uint8_t *in);
     static bool isWMBEAllowed(uint32_t method, const uint8_t *in);
 
+private:
+    IOReturn callWMI(const char *wrapper, uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength);
 };
 
 class NitroECUserClient : public IOUserClient {

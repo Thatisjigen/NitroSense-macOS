@@ -10,17 +10,47 @@
 OSDefineMetaClassAndStructors(NitroEC, IOService)
 OSDefineMetaClassAndStructors(NitroECUserClient, IOUserClient)
 
-// MARK: - Write policy: none (ANV15-52 branch, read-only)
+// MARK: - Write policy (ANV15-52 branch): EC read-only, battery-limit WMI only
 //
 // The EC map of the Acer Nitro V 15 ANV15-52 (ERAM at 0xFE708500) is known only for temperatures, fan speeds, AC, lid,
 // power limits and the keyboard backlight (an EC dump decoded against the DSDT field names); the fan,
 // mode, LED and charge bytes of the AN515-57 whitelist do not apply here and their counterparts are not identified.
-// Until they are, every write and every firmware WMI call is refused, and the SSDT of this branch exports no write
-// method either.
+// Until they are, every EC byte write and every gaming WMI call (WMBH) is refused, and the SSDT of this branch exports
+// neither WE1B nor WMBX.
+//
+// The one firmware call allowed is the battery-health WMI (\_SB.PC00.WMID.WMBE, GUID
+// 79772EC5-04B1-4BFD-843C-61E7F77B6CC9), which Acer's NitroSense uses on Windows for the 80 % charge limit and which
+// SSDT10 of this board implements like the AN515-57's (both ids go to the firmware SMI; 0x15 also notifies BAT1). The
+// whitelist is upstream's: 0x14 reads the status, 0x15 sets the limit mask only (calibration stays out).
 
 bool NitroEC::isWriteAllowed(uint32_t, uint32_t) { return false; }
 bool NitroEC::isWMBHAllowed(uint32_t, const uint8_t *) { return false; }
-bool NitroEC::isWMBEAllowed(uint32_t, const uint8_t *) { return false; }
+
+// Battery-health WMI (\_SB.PC00.WMID.WMBE), all forwarded to BIOS SMM.
+// Layout from Linuwu-Sense: get [battery 1, query 1], set [battery 1, mask, status].
+enum : uint32_t {
+    kWMBEGetHealth = 0x14,
+    kWMBESetHealth = 0x15,
+    kHealthMaskLimit = 0x01,  // 80 % charge limit. Calibration (0x02) is deliberately not allowed.
+};
+
+static bool isZeroFrom(const uint8_t *in, uint32_t start) {
+    for (uint32_t i = start; i < kNitroECWMBHInSize; i++)
+        if (in[i])
+            return false;
+    return true;
+}
+
+bool NitroEC::isWMBEAllowed(uint32_t method, const uint8_t *in) {
+    switch (method) {
+    case kWMBEGetHealth:
+        return in[0] == 1 && in[1] == kHealthMaskLimit && isZeroFrom(in, 2);
+    case kWMBESetHealth:
+        return in[0] == 1 && in[1] == kHealthMaskLimit && in[2] <= 1 && isZeroFrom(in, 3);
+    default:
+        return false;
+    }
+}
 
 // MARK: - NitroEC
 
@@ -46,11 +76,15 @@ bool NitroEC::start(IOService *provider) {
 
     acpi->retain();
 
+    // The read-only SSDT of branch anv15-52 reports the same VERS but has no WMEX: then WMBE is refused, not evaluated.
+    hasWMEX = acpi->validateObject("WMEX") == kIOReturnSuccess;
+
     uint8_t cpuTemp = 0;
     if (readByte(0x58, &cpuTemp) == kIOReturnSuccess)   // CTMP on the ANV15-52
-        LOG("started, SSDT v%u, CPU temp %u C", version, cpuTemp);
+        LOG("started, SSDT v%u, CPU temp %u C, battery WMI %s", version, cpuTemp, hasWMEX ? "available" : "absent (no WMEX)");
 
     setProperty("NitroEC SSDT Version", version, 32);
+    setProperty("NitroEC Battery WMI", hasWMEX);
     registerService();
     return true;
 }
@@ -125,9 +159,53 @@ IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *, uint32
     return kIOReturnNotPermitted;
 }
 
-IOReturn NitroEC::callWMBE(uint32_t method, const uint8_t *in, uint8_t *, uint32_t *) {
-    LOG("refused WMBE 0x%02X [%02X %02X %02X] (read-only on the ANV15-52)", method, in[0], in[1], in[2]);
-    return kIOReturnNotPermitted;
+IOReturn NitroEC::callWMBE(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
+    if (!isWMBEAllowed(method, in)) {
+        LOG("refused WMBE 0x%02X [%02X %02X %02X] (not whitelisted)", method, in[0], in[1], in[2]);
+        return kIOReturnNotPermitted;
+    }
+    if (!hasWMEX) {
+        LOG("refused WMBE 0x%02X: the loaded SSDT-NITRO has no WMEX", method);
+        return kIOReturnUnsupported;
+    }
+    return callWMI("WMEX", method, in, out, outLength);
+}
+
+IOReturn NitroEC::callWMI(const char *wrapper, uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
+    if (!acpi)
+        return kIOReturnNotReady;
+
+    OSNumber *argOpcode = OSNumber::withNumber(opcode, 32);
+    OSData *argBuffer = OSData::withBytes(in, kNitroECWMBHInSize);
+    if (!argOpcode || !argBuffer) {
+        OSSafeReleaseNULL(argOpcode);
+        OSSafeReleaseNULL(argBuffer);
+        return kIOReturnNoMemory;
+    }
+
+    OSObject *params[] = {argOpcode, argBuffer};
+    OSObject *result = nullptr;
+    IOLockLock(lock);
+    IOReturn ret = acpi->evaluateObject(wrapper, &result, params, 2);
+    IOLockUnlock(lock);
+    argOpcode->release();
+    argBuffer->release();
+    if (ret != kIOReturnSuccess)
+        return ret;
+
+    OSData *data = OSDynamicCast(OSData, result);
+    if (!data) {
+        OSSafeReleaseNULL(result);
+        return kIOReturnError;
+    }
+    uint32_t length = min(data->getLength(), *outLength);
+    memcpy(out, data->getBytesNoCopy(), length);
+    *outLength = length;
+    result->release();
+
+    LOG("%s 0x%02X [%02X %02X %02X %02X %02X %02X] -> %02X", wrapper, opcode, in[0], in[1], in[2], in[3], in[4], in[5],
+        length ? out[0] : 0xFF);
+    return kIOReturnSuccess;
 }
 
 // MARK: - NitroECUserClient
