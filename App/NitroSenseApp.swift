@@ -166,7 +166,7 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
     reading.profile = 1
     reading.batteryLimit = true
     reading.keyboard = [0, 0, 5, 100, 0, 0, 255, 255, 255]
-    ready.control = ControlState(daemonKnowsControls: true, gamingWMI: true, modeState: nil, firmware: reading)
+    ready.control = ControlState(daemonKnowsControls: true, gamingWMI: true, firmwareReadOK: true, modeState: nil, firmware: reading)
     let busy = NitroModel(preview: true)  // 5 min of made-up samples to check the hover tooltip
     busy.config = model.config
     busy.snapshot = model.snapshot

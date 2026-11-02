@@ -6,8 +6,9 @@
 //
 // Temperature: there is no real source of the RTX temperature today, so none is shown. EC GTMP (0x59) reads 0 under macOS
 // with the RTX on, and SMCNvidiaGPU 1.6 is loaded but reads nothing: kern.nvgpustate says that this NVRM "matches none of
-// the 4 known builds", kern.nvgputemp stays 0 and its SMC keys TG0x are not readable. kern.nvgputemp is what is read below,
-// so the value appears by itself the day that kext reads.
+// the 4 known builds" (our NVRM is the group's patched 2.6.6, and forcing it with nvsmcforce can crash the kernel, says its
+// author), kern.nvgputemp stays 0 and its SMC keys TG0x are not readable. kern.nvgputemp is read below, and "Temperature(C)",
+// the key Apple's own accelerators use, so the value appears by itself the day either of them has one.
 
 import Foundation
 import IOKit
@@ -52,9 +53,14 @@ private func sysctlString(_ name: String) -> String? {
 
 func readGPUStats() -> GPUStats {
     var stats = GPUStats()
-    stats.rtxLoad = percent(acceleratorStatistics("NVAccel"), ["GPU Core Utilization %", "Device Utilization %"])
+    let nvaccel = acceleratorStatistics("NVAccel")
+    stats.rtxLoad = percent(nvaccel, ["GPU Core Utilization %", "Device Utilization %"])
     stats.irisLoad = percent(acceleratorStatistics("IntelAccelerator"), ["Device Utilization %"])
-    if let temp = sysctlInteger("kern.nvgputemp"), (1...125).contains(temp) { stats.rtxTemp = temp }
+    if let temp = sysctlInteger("kern.nvgputemp"), (1...125).contains(temp) {
+        stats.rtxTemp = temp
+    } else if let temp = nvaccel?["Temperature(C)"] as? Int, (1...125).contains(temp) {
+        stats.rtxTemp = temp
+    }
     if let milliwatts = sysctlInteger("kern.nvgpupower"), milliwatts > 0 { stats.rtxPower = Double(milliwatts) / 1000 }
     if stats.rtxTemp == nil {
         stats.tempNote = sysctlString("kern.nvgpustate").map { "SMCNvidiaGPU: \($0)" }

@@ -154,10 +154,10 @@ struct FanControlPanel: View {
                 VStack(spacing: 0) {
                     ForEach(Array(fanModeItems.enumerated()), id: \.offset) { i, item in
                         if i > 0 { NSDivider() }
-                        NSListItem(label: item.label, icon: item.icon, selected: model.currentFan == item.mode, enabled: control.writable) {
+                        NSListItem(label: item.label, icon: item.icon, selected: model.currentFan == item.mode, enabled: control.canSetFan) {
                             model.setFan(item.mode)
                         }
-                        .help(control.blockedReason ?? unverifiedFirmwareHelp)
+                        .help(control.fanBlockedReason ?? unverifiedFirmwareHelp)
                     }
                 }
                 .frame(width: 170)
@@ -176,16 +176,17 @@ struct FanControlPanel: View {
             HStack(spacing: 8) {
                 Text(statusLine).font(.system(size: 11)).foregroundStyle(NS.dim).monospacedDigit()
                 UnverifiedTag(help: unverifiedFirmwareHelp)
-                NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: control.writable) { model.readFirmware() }
-                    .help(control.blockedReason ?? "Asks the firmware for the fan, mode, keyboard and charge limit state through nitrod. Each call is one SMI, so it never runs by itself until the first read has answered.")
+                NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: control.canRead) { model.readFirmware() }
+                    .help(control.readBlockedReason ?? "Asks the firmware for the fan, mode, keyboard and charge limit state through nitrod. Each call is one SMI, so it never runs by itself until the first read has answered.")
             }
         }
     }
 
     private var statusLine: String {
-        if let reason = model.control.blockedReason { return reason }
-        if let firmware = model.control.firmware { return "Firmware: \(firmware.fanSummary)" }
-        return "State not read yet"
+        if let firmware = model.control.firmware, model.control.canSetFan {
+            return "Firmware: \(firmware.fanSummary), read \(firmware.at.formatted(date: .omitted, time: .shortened))"
+        }
+        return model.control.fanBlockedReason ?? "State not read yet"
     }
 }
 
@@ -235,10 +236,10 @@ struct PowerPlanPanel: View {
                 VStack(spacing: 0) {
                     ForEach(Array(powerItems.enumerated()), id: \.offset) { i, item in
                         if i > 0 { NSDivider() }
-                        NSListItem(label: item.label, icon: item.icon, selected: model.currentProfile == powerModes[item.mode], enabled: control.writable) {
+                        NSListItem(label: item.label, icon: item.icon, selected: model.currentProfile == powerModes[item.mode], enabled: control.canSetMode) {
                             model.setPower(item.mode)
                         }
-                        .help(control.blockedReason ?? unverifiedFirmwareHelp)
+                        .help(control.modeBlockedReason ?? unverifiedFirmwareHelp)
                     }
                 }
                 .padding(.vertical, 4)
@@ -254,9 +255,15 @@ struct PowerPlanPanel: View {
 
     private var statusLine: String {
         guard let value = model.currentProfile else { return "Mode unknown (EC FANT \(model.snapshot.fant))" }
-        var line = "\(profileName(value)), \(model.control.firmware?.profile != nil ? "answered by the firmware" : "read from EC FANT")"
+        var line: String
+        if let firmware = model.control.firmware, firmware.profile != nil {
+            line = "\(profileName(value)), firmware at \(firmware.at.formatted(date: .omitted, time: .shortened))"
+            if let fant = profileValueFromFANT(model.snapshot.fant), fant != value { line += "; EC FANT says \(profileName(fant))" }
+        } else {
+            line = "\(profileName(value)), read from EC FANT"
+        }
         if !powerModes.values.contains(value) { line += " (not offered here)" }
-        if let reason = model.control.blockedReason { line += ". Changing it \(reason)." }
+        if let reason = model.control.modeBlockedReason { line += ". To change it: \(reason)." }
         return line
     }
 }
@@ -575,7 +582,7 @@ struct SettingsMenu: View {
                     Text(model.connected ? "nitrod running" : "nitrod not reachable")
                         .foregroundStyle(model.connected ? NS.dim : NS.red)
                     Spacer()
-                    NSButton(label: "Re-apply my settings", enabled: model.control.writable && hasChoices) { model.reapply() }
+                    NSButton(label: "Re-apply my settings", enabled: model.control.canRead && hasChoices) { model.reapply() }
                         .help(choicesHelp)
                 }
                 .font(.system(size: 12))
@@ -687,7 +694,7 @@ struct MenuContent: View {
             menuSection("Fan Control") {
                 HStack(spacing: 10) {
                     ForEach(fanModeItems, id: \.mode) { item in
-                        HexRadio(label: item.label, selected: model.currentFan == item.mode, enabled: model.control.writable) {
+                        HexRadio(label: item.label, selected: model.currentFan == item.mode, enabled: model.control.canSetFan) {
                             model.setFan(item.mode)
                         }
                     }
@@ -696,7 +703,7 @@ struct MenuContent: View {
             menuSection("Power Plan") {
                 HStack(spacing: 10) {
                     ForEach(powerItems, id: \.mode) { item in
-                        HexRadio(label: item.label, selected: model.currentProfile == powerModes[item.mode], enabled: model.control.writable) {
+                        HexRadio(label: item.label, selected: model.currentProfile == powerModes[item.mode], enabled: model.control.canSetMode) {
                             model.setPower(item.mode)
                         }
                     }
@@ -704,7 +711,7 @@ struct MenuContent: View {
             }
             HStack(spacing: 6) {
                 UnverifiedTag(help: unverifiedFirmwareHelp)
-                Text(model.control.blockedReason ?? "Fan and power controls not yet proven on this board")
+                Text(model.control.fanBlockedReason ?? model.control.modeBlockedReason ?? "Fan and power controls not yet proven on this board")
                     .font(.system(size: 10)).foregroundStyle(NS.dim)
             }
             Divider().overlay(Color(white: 0.25))

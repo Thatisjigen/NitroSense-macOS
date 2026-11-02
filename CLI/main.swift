@@ -125,6 +125,9 @@ do {
         case "status":
             printFans(ec, "Fan behaviour")
         case "auto", "max":
+            // Reads first: a write that could not be read back would prove nothing.
+            _ = try readFanBehavior(ec, gpu: false)
+            _ = try readFanBehavior(ec, gpu: true)
             printFans(ec, "Before")
             try setFanBehavior(ec, max: args[1] == "max")
             print("SetGamingFanBehavior \(args[1]): firmware status 0")
@@ -138,6 +141,7 @@ do {
         if args[1] == "status" {
             printPowerMode(ec, "Power mode")
         } else if let value = powerModes[args[1]] {
+            _ = try readMiscSetting(ec, GamingWMI.miscPlatformProfile)  // reads first, as for the fans
             printPowerMode(ec, "Before")
             try setPlatformProfile(ec, value)
             print("SetGamingMiscSetting 0x0B \(hex(value)) (\(profileName(value))): firmware status 0")

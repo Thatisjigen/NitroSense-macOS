@@ -6,6 +6,7 @@
 //   {"cmd":"firmware"}               -> runs the GET calls, once every few seconds at most
 //   {"cmd":"fan","mode":"auto|max"}  -> SetGamingFanBehavior, then read back; the choice is remembered
 //   {"cmd":"power","mode":"quiet|balance|performance"} -> SetGamingMiscSetting 0x0B, then read back; the choice is remembered
+//     (both refused until the matching GET has answered: a write that cannot be read back proves nothing)
 //   {"cmd":"apply"}                  -> re-apply what the user chose
 //
 // Nothing has been tested on this board, so nitrod never calls the firmware by itself until the user chose a setting with
@@ -122,7 +123,7 @@ final class Daemon {
         let reading = FirmwareReading(ec)
         firmware = reading
         lastFirmwareRead = Date()
-        if reading.fanCPU != nil, reading.fanGPU != nil, reading.profile != nil, !config.firmwareReadOK {
+        if (reading.fanCPU != nil && reading.fanGPU != nil) || reading.profile != nil, !config.firmwareReadOK {
             config.firmwareReadOK = true
             save()
         }
@@ -157,12 +158,12 @@ final class Daemon {
                 let cpu = try readFanBehavior(ec, gpu: false), gpu = try readFanBehavior(ec, gpu: true)
                 // 0 is the firmware's own default before anyone set it: that is Auto too, for a choice of Auto.
                 let alreadyThere = wanted == 1 ? cpu <= 1 && gpu <= 1 : cpu == wanted && gpu == wanted
+                if wanted != 1 { fanOffAuto = true }
                 if !alreadyThere {
                     log("apply (\(reason)): fans CPU \(fanBehaviorName(cpu)), GPU \(fanBehaviorName(gpu)) -> \(fanBehaviorName(wanted))")
-                    if wanted != 1 { fanOffAuto = true }
                     try setFanBehavior(ec, max: wanted != 1)
-                    if wanted == 1 { fanOffAuto = false }
                 }
+                if wanted == 1 { fanOffAuto = false }
             } catch {
                 log("apply (\(reason)): fans: \(error)")
             }
@@ -189,7 +190,7 @@ final class Daemon {
         }
         if let d = try? ec.dump() { reply["ec"] = d.map { Int($0) } }
         if let cpuPower, Date().timeIntervalSince(cpuPowerAt) < 6 { reply["cpuPower"] = cpuPower }
-        var control: [String: Any] = ["gamingWMI": gamingWMI]
+        var control: [String: Any] = ["gamingWMI": gamingWMI, "firmwareReadOK": config.firmwareReadOK]
         if let state = try? ec.modeState() { control["modeState"] = state.map { Int($0) } }
         if let firmware, let data = try? JSONEncoder().encode(firmware), let obj = try? JSONSerialization.jsonObject(with: data) {
             control["firmware"] = obj
@@ -214,6 +215,7 @@ final class Daemon {
                 return ["ok": false, "error": "fan mode must be auto or max: manual duty and the curve are left out on the \(Reg.model)"]
             }
             guard gamingWMI else { return noGamingWMI() }
+            guard answered({ $0.fanCPU != nil && $0.fanGPU != nil }) else { return notRead("fan behaviour") }
             do {
                 if mode == "max" { fanOffAuto = true }
                 try setFanBehavior(ec, max: mode == "max")
@@ -237,6 +239,7 @@ final class Daemon {
                 return ["ok": false, "error": "power mode must be quiet, balance or performance"]
             }
             guard gamingWMI else { return noGamingWMI() }
+            guard answered({ $0.profile != nil }) else { return notRead("power mode") }
             do {
                 try setPlatformProfile(ec, value)
                 config.userMode = mode
@@ -258,6 +261,18 @@ final class Daemon {
         default:
             return ["ok": false, "error": "cmd must be status, firmware, fan, power or apply"]
         }
+    }
+
+    // A write needs its GET to have answered. After a restart of nitrod, on a machine where the GETs already answered once,
+    // it may ask again by itself; the first read of all is always a client's.
+    private func answered(_ check: (FirmwareReading) -> Bool) -> Bool {
+        if firmware == nil, config.firmwareReadOK { readFirmware() }
+        return firmware.map(check) ?? false
+    }
+
+    private func notRead(_ what: String) -> [String: Any] {
+        ["ok": false, "error": firmware == nil ? "read the firmware first: \(what) is not written before its state has been read"
+                                               : "not writing \(what): the firmware did not answer the read (\(firmware?.errors.joined(separator: "; ") ?? ""))"]
     }
 
     private func noGamingWMI() -> [String: Any] {

@@ -43,17 +43,30 @@ struct Sample {
 struct ControlState: Equatable {
     var daemonKnowsControls = false
     var gamingWMI = false
+    var firmwareReadOK = false
     var modeState: [UInt8]?
     var firmware: FirmwareReading?
 
-    var writable: Bool { daemonKnowsControls && gamingWMI }
+    var canRead: Bool { daemonKnowsControls && gamingWMI }
+    // A write needs its GET to have answered: nitrod refuses it otherwise, so the button says it first.
+    var canSetFan: Bool { canRead && firmware?.fanCPU != nil && firmware?.fanGPU != nil }
+    var canSetMode: Bool { canRead && firmware?.profile != nil }
 
-    // Why the fan and mode controls are greyed out, when they are.
-    var blockedReason: String? {
+    // Why a control is greyed out, when it is.
+    var readBlockedReason: String? {
         if !daemonKnowsControls { return "needs the nitrod of this build" }
         if !gamingWMI { return "needs the kext and SSDT of this build, then a reboot" }
         return nil
     }
+
+    private func writeBlockedReason(_ can: Bool, _ what: String) -> String? {
+        if let reason = readBlockedReason { return reason }
+        if firmware == nil { return "press Read firmware first" }
+        return can ? nil : "the firmware did not answer the \(what) read"
+    }
+
+    var fanBlockedReason: String? { writeBlockedReason(canSetFan, "fan") }
+    var modeBlockedReason: String? { writeBlockedReason(canSetMode, "mode") }
 }
 
 // Whole-machine draw while on battery: Voltage (mV) × Amperage (mA, negative when
@@ -152,8 +165,8 @@ final class NitroModel {
 
     func reapply() { send(["cmd": "apply"], isStatus: false) }
 
-    // A window opens: refresh what the firmware says, but only on a machine where these calls already answered once by hand.
-    // The first read is always a click, or 'sudo nitroctl firmware'. Waits for the next status reply to know.
+    // A window opens: refresh what the firmware says, but only on a machine where these calls already answered once. The
+    // first read is always a click on Read firmware. Waits for the next status reply to know.
     func requestTrustedRead() { wantsTrustedRead = true }
 
     private func send(_ request: [String: Any], isStatus: Bool) {
@@ -216,7 +229,7 @@ final class NitroModel {
                 if history.count > 150 { history.removeFirst(history.count - 150) }
             }
         }
-        if isStatus, wantsTrustedRead, config.firmwareReadOK, control.writable {
+        if isStatus, wantsTrustedRead, control.firmwareReadOK, control.canRead {
             wantsTrustedRead = false
             readFirmware()
         }
@@ -227,6 +240,7 @@ final class NitroModel {
         if let dict {
             next.daemonKnowsControls = true
             next.gamingWMI = dict["gamingWMI"] as? Bool ?? false
+            next.firmwareReadOK = dict["firmwareReadOK"] as? Bool ?? false
             next.modeState = (dict["modeState"] as? [Int])?.map { UInt8(truncatingIfNeeded: $0) }
             if let obj = dict["firmware"], let data = try? JSONSerialization.data(withJSONObject: obj) {
                 next.firmware = try? JSONDecoder().decode(FirmwareReading.self, from: data)

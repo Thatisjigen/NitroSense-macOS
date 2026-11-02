@@ -149,7 +149,7 @@ func printStatus(_ ec: [UInt8]) {
     let extras = Reg.extraTemps.map { "\($0.0) \(ec[$0.1])" }.joined(separator: "  ")
     let gpu = readGPUStats()
     let gtmp = Int(ec[Reg.gpuTemp])
-    let rtxTemp = gpu.rtxTemp.map { "\($0) °C (SMCNvidiaGPU)" }
+    let rtxTemp = gpu.rtxTemp.map { "\($0) °C" }
         ?? (gtmp > 0 ? "\(gtmp) °C (EC GTMP)" : "-- (\(gpu.tempNote ?? "no source"); EC GTMP reads 0)")
     func load(_ v: Int?) -> String { v.map { "\($0) %" } ?? "--" }
     let fant = ec[Reg.fanTable] & 0x0F

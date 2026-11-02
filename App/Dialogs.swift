@@ -61,15 +61,15 @@ struct KeyboardPanel: View {
                 }
                 row("Brightness level", "not exposed", "no EC byte identified yet: 'nitroctl ecdiff' finds it when the Fn key is pressed") { EmptyView() }
                 row("Firmware report", firmwareText, "GetGamingKBBacklight, WMBH 0x15, read through nitrod") {
-                    NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: model.control.writable) { model.readFirmware() }
-                        .help(model.control.blockedReason ?? "Asks the firmware through nitrod: one SMI per call")
+                    NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: model.control.canRead) { model.readFirmware() }
+                        .help(model.control.readBlockedReason ?? "Asks the firmware through nitrod: one SMI per call")
                 }
             }
         }
     }
 
     private var firmwareText: String {
-        guard let firmware = model.control.firmware else { return model.control.blockedReason ?? "not read yet" }
+        guard let firmware = model.control.firmware else { return model.control.readBlockedReason ?? "not read yet" }
         guard let k = firmware.keyboard, k.count >= 4 else { return "no answer" }
         return "brightness byte \(k[3]), mode \(k[1])   raw \(k.prefix(9).map { String(format: "%02X", $0) }.joined(separator: " "))"
     }
