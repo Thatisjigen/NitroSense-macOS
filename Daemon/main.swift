@@ -118,6 +118,7 @@ final class Daemon {
 
     // Everything the firmware forgets across boot/sleep. Each step is independent.
     func applyAll(reason: String) {
+        if Reg.readOnlyModel { log("apply (\(reason)): skipped, \(readOnlyMessage)"); return }
         log("apply (\(reason))")
         step("psee") { try setPSEE(ec, true) }
         step("mode") { try setNitroMode(ec, config.nitroMode) }
@@ -153,6 +154,7 @@ final class Daemon {
     func curveDrives(_ unit: FanUnit) -> Bool { unit == .cpu || config.fan.curveGPU }
 
     func applyFans() {
+        if Reg.readOnlyModel { return }
         duty = [:]
         lowerCount = [:]
         if failsafe { return }
@@ -176,6 +178,7 @@ final class Daemon {
     }
 
     func tick() {
+        if Reg.readOnlyModel { return }   // no curve, no failsafe writes: this branch only reads
         guard let d = try? ec.dump() else { return }
         let temps: [FanUnit: UInt8] = [.cpu: d[Reg.cpuTemp], .gpu: d[Reg.gpuTemp]]
         let hottest = max(temps[.cpu]!, temps[.gpu]!)

@@ -1,3 +1,14 @@
+> **Branch `anv15-52` — Acer Nitro V 15 ANV15-52 (i9-13900H, RTX 5050), first version, read-only.**
+> The EC window of this board is at `0xFE708500` (the SSDT of this branch) and its field map differs from the
+> AN515-57's: so far only temperatures (`CTMP` 0x58, `GTMP` 0x59, `ETP1..6`), fan speeds (`CPUF` 0x5C, `GPUF` 0x6A,
+> 16-bit big-endian), AC (0x40 bit 0), lid (0x4C bit 6), power limits (`PL1` 0x14, `PL2` 0x16, tenths of a watt) and the
+> keyboard backlight bit (0x48) are identified, from an EC dump taken under Linux in five states.
+> The fan-mode, Nitro-mode, LED, charge and timeout bytes are not identified, so **nothing is written**: the SSDT
+> exports no write method, `NitroEC.kext` refuses every write and WMI call, `nitroctl`'s write commands fail with a
+> message and `nitrod` applies nothing (it still serves `status`). `nitroctl status`, `dump`, `read`, `watch` and the
+> app's monitoring work. Writes come back only after the Windows NitroSense snapshots (Quiet/Balance/Extreme) give the
+> mode and fan bytes a meaning. Everything below describes the upstream AN515-57 version.
+
 # NitroSense for macOS
 
 A native macOS take on Acer **NitroSense** for Hackintosh laptops: fan control, power plan,

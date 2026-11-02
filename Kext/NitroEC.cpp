@@ -10,115 +10,17 @@
 OSDefineMetaClassAndStructors(NitroEC, IOService)
 OSDefineMetaClassAndStructors(NitroECUserClient, IOUserClient)
 
-// MARK: - Write whitelist (AN515-57, verified against DSDT + OpeNitro/Packss)
+// MARK: - Write policy: none (ANV15-52 branch, read-only)
+//
+// The EC map of the Acer Nitro V 15 ANV15-52 (ERAM at 0xFE708500) is known only for temperatures, fan speeds, AC, lid,
+// power limits and the keyboard backlight (an EC dump decoded against the DSDT field names); the fan,
+// mode, LED and charge bytes of the AN515-57 whitelist do not apply here and their counterparts are not identified.
+// Until they are, every write and every firmware WMI call is refused, and the SSDT of this branch exports no write
+// method either.
 
-enum : uint32_t {
-    kRegPowerFlags  = 0x03,  // LMEN bit0, PSEE bit4 (set by firmware WMBH 0x05), BTHE bit6
-    kPSEEBit        = 0x10,
-    kRegKBTimeout   = 0x06,  // 0x1E = backlight off after 30 s idle, 0x00 = always on
-    kRegUSBCharge   = 0x08,  // 0x0F = USB power-off charging on, 0x1F = off
-    kRegGPUFanMode  = 0x21,
-    kRegCPUFanMode  = 0x22,
-    kRegCPUFanSpeed = 0x37,
-    kRegGPUFanSpeed = 0x3A,
-
-    kCPUFanAuto = 0x04, kCPUFanMax = 0x08, kCPUFanManual = 0x0C,
-    kGPUFanAuto = 0x10, kGPUFanMax = 0x20, kGPUFanManual = 0x30,
-
-    // Manual duty is a percentage: firmware WMBH 0x10 rejects > 100. Below 20 %
-    // is refused so a typo can never park a fan.
-    kFanSpeedMin = 20, kFanSpeedMax = 100,
-
-    // Firmware gaming WMI (\_SB.PC00.WMID.WMBH) opcodes. 0x01-0x04, 0x08-0x0F,
-    // 0x18, 0x19 are forwarded to BIOS SMM (WSMI); the rest touch EC fields.
-    kWMBHSetGamingLED = 0x02, // SMM. AN515-57 needs [08 .. byte5 = zone mask] to light the 4-zone keyboard
-    kWMBHGetGamingLED = 0x04, // SMM
-    kWMBHGetSensor   = 0x05,  // also sets PSEE
-    kWMBHSetZoneRGB  = 0x06,
-    kWMBHGetZoneRGB  = 0x07,
-    kWMBHSetFanSpeed = 0x10,
-    kWMBHGetFanSpeed = 0x11,
-    kWMBHGetFanTable = 0x13,
-    kWMBHSetLEDMode  = 0x14,
-    kWMBHGetLEDMode  = 0x15,
-    kWMBHSetMisc     = 0x16,  // only sub-function 0x0B (OPMS / nitro mode)
-};
-
-static bool isZoneMask(uint8_t v) { return v == 1 || v == 2 || v == 4 || v == 8; }
-static bool isFanGroup(uint8_t v) { return v == 1 || v == 4; }
-
-bool NitroEC::isWriteAllowed(uint32_t offset, uint32_t value) {
-    switch (offset) {
-    case kRegCPUFanMode:
-        return value == kCPUFanAuto || value == kCPUFanMax || value == kCPUFanManual;
-    case kRegGPUFanMode:
-        return value == kGPUFanAuto || value == kGPUFanMax || value == kGPUFanManual;
-    case kRegCPUFanSpeed:
-    case kRegGPUFanSpeed:
-        return value >= kFanSpeedMin && value <= kFanSpeedMax;
-    case kRegKBTimeout:
-        return value == 0x00 || value == 0x1E;
-    case kRegUSBCharge:
-        return value == 0x0F || value == 0x1F;
-    case kRegPowerFlags:
-        return true;  // writeByte() only lets the PSEE bit change
-    default:
-        return false;
-    }
-}
-
-// Battery-health WMI (\_SB.PC00.WMID.WMBE), all forwarded to BIOS SMM.
-// Layout from Linuwu-Sense: get [battery 1, query 1], set [battery 1, mask, status].
-enum : uint32_t {
-    kWMBEGetHealth = 0x14,
-    kWMBESetHealth = 0x15,
-    kHealthMaskLimit = 0x01,  // 80 % charge limit. Calibration (0x02) is deliberately not allowed.
-};
-
-static bool isZeroFrom(const uint8_t *in, uint32_t start) {
-    for (uint32_t i = start; i < kNitroECWMBHInSize; i++)
-        if (in[i])
-            return false;
-    return true;
-}
-
-bool NitroEC::isWMBHAllowed(uint32_t opcode, const uint8_t *in) {
-    switch (opcode) {
-    case kWMBHSetGamingLED:
-        // Only the keyboard zone-enable form used by the Linux driver for AN515-57.
-        return in[0] == 0x08 && !in[1] && !in[2] && !in[3] && !in[4] && in[5] <= 0x0F && isZeroFrom(in, 6);
-    case kWMBHGetGamingLED:
-        return in[0] == 0x08 && isZeroFrom(in, 1);
-    case kWMBHGetSensor:
-        return in[0] <= 2;
-    case kWMBHSetZoneRGB:
-    case kWMBHGetZoneRGB:
-        return isZoneMask(in[0]);
-    case kWMBHSetFanSpeed:
-        return isFanGroup(in[0]) && in[1] >= kFanSpeedMin && in[1] <= kFanSpeedMax;
-    case kWMBHGetFanSpeed:
-        return isFanGroup(in[0]);
-    case kWMBHGetFanTable:
-    case kWMBHSetLEDMode:
-    case kWMBHGetLEDMode:
-        return true;
-    case kWMBHSetMisc:
-        return in[0] == 0x0B && (in[1] == 0x00 || in[1] == 0x01 || in[1] == 0x04);
-    default:
-        return false;
-    }
-}
-
-bool NitroEC::isWMBEAllowed(uint32_t method, const uint8_t *in) {
-    switch (method) {
-    case kWMBEGetHealth:
-        return in[0] == 1 && in[1] == kHealthMaskLimit && isZeroFrom(in, 2);
-    case kWMBESetHealth:
-        return in[0] == 1 && in[1] == kHealthMaskLimit && in[2] <= 1 && isZeroFrom(in, 3);
-    default:
-        return false;
-    }
-}
+bool NitroEC::isWriteAllowed(uint32_t, uint32_t) { return false; }
+bool NitroEC::isWMBHAllowed(uint32_t, const uint8_t *) { return false; }
+bool NitroEC::isWMBEAllowed(uint32_t, const uint8_t *) { return false; }
 
 // MARK: - NitroEC
 
@@ -145,7 +47,7 @@ bool NitroEC::start(IOService *provider) {
     acpi->retain();
 
     uint8_t cpuTemp = 0;
-    if (readByte(0xB0, &cpuTemp) == kIOReturnSuccess)
+    if (readByte(0x58, &cpuTemp) == kIOReturnSuccess)   // CTMP on the ANV15-52
         LOG("started, SSDT v%u, CPU temp %u C", version, cpuTemp);
 
     setProperty("NitroEC SSDT Version", version, 32);
@@ -154,9 +56,7 @@ bool NitroEC::start(IOService *provider) {
 }
 
 void NitroEC::stop(IOService *provider) {
-    // Never leave the fans in manual mode without a driver behind them.
-    writeByte(kRegCPUFanMode, kCPUFanAuto);
-    writeByte(kRegGPUFanMode, kGPUFanAuto);
+    // Nothing to put back: this branch never writes to the EC.
     OSSafeReleaseNULL(acpi);
     IOService::stop(provider);
 }
@@ -216,100 +116,18 @@ IOReturn NitroEC::dump(uint8_t *buffer, uint32_t length) {
 }
 
 IOReturn NitroEC::writeByte(uint32_t offset, uint32_t value) {
-    if (!isWriteAllowed(offset, value)) {
-        LOG("refused write 0x%02X = 0x%02X (not whitelisted)", offset, value);
-        return kIOReturnNotPermitted;
-    }
-    if (!acpi)
-        return kIOReturnNotReady;
-
-    if (offset == kRegPowerFlags) {
-        uint8_t current = 0;
-        IOReturn ret = readByte(offset, &current);
-        if (ret != kIOReturnSuccess)
-            return ret;
-        if ((current ^ value) & ~kPSEEBit) {
-            LOG("refused write 0x03 = 0x%02X (only PSEE may change, current 0x%02X)", value, current);
-            return kIOReturnNotPermitted;
-        }
-    }
-
-    OSNumber *argOffset = OSNumber::withNumber(offset, 32);
-    OSNumber *argValue = OSNumber::withNumber(value, 32);
-    if (!argOffset || !argValue) {
-        OSSafeReleaseNULL(argOffset);
-        OSSafeReleaseNULL(argValue);
-        return kIOReturnNoMemory;
-    }
-
-    OSObject *params[] = {argOffset, argValue};
-    UInt32 result = 0;
-    IOLockLock(lock);
-    IOReturn ret = acpi->evaluateInteger("WE1B", &result, params, 2);
-    IOLockUnlock(lock);
-    argOffset->release();
-    argValue->release();
-
-    if (ret != kIOReturnSuccess)
-        return ret;
-    if (result != 0)
-        return kIOReturnError;
-
-    LOG("wrote 0x%02X = 0x%02X", offset, value);
-    return kIOReturnSuccess;
+    LOG("refused write 0x%02X = 0x%02X (read-only on the ANV15-52)", offset, value);
+    return kIOReturnNotPermitted;
 }
 
-IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
-    if (!isWMBHAllowed(opcode, in)) {
-        LOG("refused WMBH 0x%02X [%02X %02X] (not whitelisted)", opcode, in[0], in[1]);
-        return kIOReturnNotPermitted;
-    }
-    return callWMI("WMBX", opcode, in, out, outLength);
+IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *, uint32_t *) {
+    LOG("refused WMBH 0x%02X [%02X %02X] (read-only on the ANV15-52)", opcode, in[0], in[1]);
+    return kIOReturnNotPermitted;
 }
 
-IOReturn NitroEC::callWMBE(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
-    if (!isWMBEAllowed(method, in)) {
-        LOG("refused WMBE 0x%02X [%02X %02X %02X] (not whitelisted)", method, in[0], in[1], in[2]);
-        return kIOReturnNotPermitted;
-    }
-    return callWMI("WMEX", method, in, out, outLength);
-}
-
-IOReturn NitroEC::callWMI(const char *wrapper, uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
-    if (!acpi)
-        return kIOReturnNotReady;
-
-    OSNumber *argOpcode = OSNumber::withNumber(opcode, 32);
-    OSData *argBuffer = OSData::withBytes(in, kNitroECWMBHInSize);
-    if (!argOpcode || !argBuffer) {
-        OSSafeReleaseNULL(argOpcode);
-        OSSafeReleaseNULL(argBuffer);
-        return kIOReturnNoMemory;
-    }
-
-    OSObject *params[] = {argOpcode, argBuffer};
-    OSObject *result = nullptr;
-    IOLockLock(lock);
-    IOReturn ret = acpi->evaluateObject(wrapper, &result, params, 2);
-    IOLockUnlock(lock);
-    argOpcode->release();
-    argBuffer->release();
-    if (ret != kIOReturnSuccess)
-        return ret;
-
-    OSData *data = OSDynamicCast(OSData, result);
-    if (!data) {
-        OSSafeReleaseNULL(result);
-        return kIOReturnError;
-    }
-    uint32_t length = min(data->getLength(), *outLength);
-    memcpy(out, data->getBytesNoCopy(), length);
-    *outLength = length;
-    result->release();
-
-    LOG("%s 0x%02X [%02X %02X %02X %02X %02X %02X] -> %02X", wrapper, opcode, in[0], in[1], in[2], in[3], in[4], in[5],
-        length ? out[0] : 0xFF);
-    return kIOReturnSuccess;
+IOReturn NitroEC::callWMBE(uint32_t method, const uint8_t *in, uint8_t *, uint32_t *) {
+    LOG("refused WMBE 0x%02X [%02X %02X %02X] (read-only on the ANV15-52)", method, in[0], in[1], in[2]);
+    return kIOReturnNotPermitted;
 }
 
 // MARK: - NitroECUserClient

@@ -22,8 +22,8 @@ struct Snapshot: Equatable {
         cpuTemp = Int(ec[Reg.cpuTemp])
         gpuTemp = Int(ec[Reg.gpuTemp])
         sysTemp = Int(ec[Reg.sysTemp])
-        cpuRPM = Int(ec[Reg.cpuFanRPM]) | Int(ec[Reg.cpuFanRPM + 1]) << 8
-        gpuRPM = Int(ec[Reg.gpuFanRPM]) | Int(ec[Reg.gpuFanRPM + 1]) << 8
+        cpuRPM = be16(ec, Reg.cpuFanRPM)   // ANV15-52: big-endian
+        gpuRPM = be16(ec, Reg.gpuFanRPM)
         cpuFanMode = ec[Reg.cpuFanMode]
         gpuFanMode = ec[Reg.gpuFanMode]
         cpuDuty = Int(ec[Reg.cpuFanSpeed])

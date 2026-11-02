@@ -6,7 +6,7 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 
-// Matches \_SB.NTRO (_HID "NTRO0001") from SSDT-NITRO and exposes EC RAM reads.
+// Matches \_SB.NTRO (_HID "NTRO0001") from SSDT-NITRO and exposes EC RAM reads. Branch anv15-52: reads only.
 class NitroEC : public IOService {
     OSDeclareDefaultStructors(NitroEC)
 
@@ -28,8 +28,6 @@ public:
     static bool isWMBHAllowed(uint32_t opcode, const uint8_t *in);
     static bool isWMBEAllowed(uint32_t method, const uint8_t *in);
 
-private:
-    IOReturn callWMI(const char *wrapper, uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength);
 };
 
 class NitroECUserClient : public IOUserClient {

@@ -65,6 +65,7 @@ final class NitroEC {
 
     @discardableResult
     func writeByte(_ offset: Int, _ value: Int) throws -> UInt8 {
+        if Reg.readOnlyModel { throw NitroECError(description: readOnlyMessage) }
         var input: [UInt64] = [UInt64(offset), UInt64(value)]
         var output: UInt64 = 0
         var outputCount: UInt32 = 1
@@ -90,6 +91,7 @@ final class NitroEC {
     }
 
     private func wmi(_ selector: NitroECSelector, _ name: String, _ opcode: UInt8, _ bytes: [UInt8]) throws -> [UInt8] {
+        if Reg.readOnlyModel { throw NitroECError(description: readOnlyMessage) }
         var input = [UInt8](repeating: 0, count: Int(kNitroECWMBHInSize))
         for (i, b) in bytes.prefix(input.count).enumerated() { input[i] = b }
         var scalar = UInt64(opcode)
@@ -120,31 +122,38 @@ final class NitroEC {
     }
 }
 
-// MARK: - AN515-57 EC map (offsets verified against DSDT field names)
-
+// MARK: - ANV15-52 EC map (Acer Nitro V 15, i9-13900H + RTX 5050; DSDT ERAM at 0xFE708500)
+//
+// From an EC dump decoded against this board's DSDT field names: five snapshots (idle on AC, 60 s load, after load, on battery, lid
+// closed). Only the fields below are understood. The fan mode, Nitro mode, keyboard LED, USB charge, keyboard
+// timeout and battery flags of the AN515-57 map are NOT identified on this board, so this branch is read-only: the
+// kext refuses every write, and the shared code below refuses them before asking the kext.
 enum Reg {
-    static let acStatus: Int = 0x00      // ACST
-    static let battery: Int = 0x03       // LMEN bit0, PSEE bit4 (gaming software present), BTHE bit6 (80 % limit)
-    static let kbTimeout: Int = 0x06
-    static let usbCharge: Int = 0x08
-    static let cpuFanRPM: Int = 0x13     // C1FR, 16-bit LE
-    static let gpuFanRPM: Int = 0x15     // G1FR, 16-bit LE
-    static let ledEffect: Int = 0x17     // KBLE
-    static let ledSpeed: Int = 0x18      // KBLS
-    static let ledBright: Int = 0x19     // KBBP
-    static let ledDir: Int = 0x1B        // KBED
-    static let ledColor: Int = 0x1C      // KBCR, KBCG, KBCB
-    static let gpuFanMode: Int = 0x21
-    static let cpuFanMode: Int = 0x22
-    static let nitroMode: Int = 0x2C     // OPMS
-    static let cpuFanSpeed: Int = 0x37   // CPUF
-    static let gpuFanSpeed: Int = 0x3A   // GPUF
-    static let zoneColors: Int = 0x3C    // KB1R..KB4B
-    static let cpuTemp: Int = 0xB0       // CTMP
-    static let sysTemp: Int = 0xB3       // SKTB
-    static let gpuTemp: Int = 0xB6       // EST1
-    static let batteryStatus: Int = 0xC1 // BST0
+    static let model = "ANV15-52"
+    static let readOnlyModel = true
+    static let cpuTemp: Int = 0x58        // CTMP, °C (50 idle, 97 under load, like Linux acpitz)
+    static let gpuTemp: Int = 0x59        // GTMP, °C (name from the DSDT; which sensor it is was not verified)
+    static let sysTemp: Int = 0x51        // ETP1, °C (45-62 in the dump; sensor unverified)
+    static let extraTemps: [(String, Int)] = [("ETP2", 0x52), ("ETP3", 0x5A), ("ETP4", 0x5B), ("ETP5", 0x5E), ("ETP6", 0x5F)]
+    static let cpuFanRPM: Int = 0x5C      // CPUF, 16-bit BIG-endian (1909 idle, 3743 under load)
+    static let gpuFanRPM: Int = 0x6A      // GPUF, 16-bit big-endian (2132 idle, 3993 under load)
+    static let acStatus: Int = 0x40       // ACDF bit 0: AC present
+    static let lid: Int = 0x4C            // LIDT bit 6: lid closed
+    static let pl1: Int = 0x14            // PL1H:PL1L, tenths of a watt (56 W on AC, 32 W on battery)
+    static let pl2: Int = 0x16            // PL2H:PL2L, tenths of a watt (92 W on AC, 36 W on battery)
+    static let kbBacklight: Int = 0x48    // KBBL bit 0
+    static let modeCandidateA: Int = 0x6D // ACTP, 2 in every snapshot: Nitro mode candidate, to confirm with Windows snapshots
+    static let modeCandidateB: Int = 0x70 // BTMD, 1 in every snapshot: same
+    // AN515-57 names kept so the shared code (config, daemon, app) compiles; all point at byte 0x00 (ECTM, the EC
+    // version), which is harmless to read, and nothing is ever written on this branch.
+    static let unknown: Int = 0x00
+    static let battery = unknown, kbTimeout = unknown, usbCharge = unknown
+    static let ledEffect = unknown, ledSpeed = unknown, ledBright = unknown, ledDir = unknown, ledColor = unknown, zoneColors = unknown
+    static let gpuFanMode = unknown, cpuFanMode = unknown, nitroMode = unknown, cpuFanSpeed = unknown, gpuFanSpeed = unknown
+    static let batteryStatus = unknown
 }
+func be16(_ ec: [UInt8], _ at: Int) -> Int { Int(ec[at]) << 8 | Int(ec[at + 1]) }
+let readOnlyMessage = "read-only on the \(Reg.model): the fan and mode bytes of this EC are not identified yet (branch anv15-52)"
 
 func hex(_ v: UInt8) -> String { String(format: "0x%02X", v) }
 
@@ -195,20 +204,14 @@ func rgb(_ ec: [UInt8], _ at: Int) -> String {
 }
 
 func printStatus(_ ec: [UInt8]) {
-    let u16 = { (at: Int) in Int(ec[at]) | Int(ec[at + 1]) << 8 }
-    let zones = (0..<4).map { rgb(ec, Reg.zoneColors + $0 * 3) }.joined(separator: " ")
-
+    let extras = Reg.extraTemps.map { "\($0.0) \(ec[$0.1])" }.joined(separator: "  ")
     print("""
-    Temperatures   CPU \(ec[Reg.cpuTemp]) °C   GPU \(ec[Reg.gpuTemp]) °C   SYS? \(ec[Reg.sysTemp]) °C (0xB3, unverified)
-    CPU fan        \(u16(Reg.cpuFanRPM)) RPM   mode \(fanMode(ec[Reg.cpuFanMode], cpu: true))   manual \(ec[Reg.cpuFanSpeed])%
-    GPU fan        \(u16(Reg.gpuFanRPM)) RPM   mode \(fanMode(ec[Reg.gpuFanMode], cpu: false))   manual \(ec[Reg.gpuFanSpeed])%
-    Nitro mode     \(nitroMode(ec[Reg.nitroMode]))
-    PSEE flag      \(ec[Reg.battery] & 0x10 != 0 ? "on" : "off")
-    Power          AC \(ec[Reg.acStatus] & 0x01 == 1 ? "plugged" : "unplugged")   battery \(batteryStatus(ec[Reg.batteryStatus]))   80% limit \(ec[Reg.battery] & 0x40 != 0 ? "on" : "off") (\(hex(ec[Reg.battery])))
-    USB off-charge \(ec[Reg.usbCharge] == 0x0F ? "on" : ec[Reg.usbCharge] == 0x1F ? "off" : "? \(hex(ec[Reg.usbCharge]))")
-    KB timeout 30s \(ec[Reg.kbTimeout] == 0x1E ? "on" : ec[Reg.kbTimeout] == 0x00 ? "off" : "? \(hex(ec[Reg.kbTimeout]))")
-    Keyboard LED   effect \(ledEffect(ec[Reg.ledEffect]))   speed \(ec[Reg.ledSpeed])   brightness \(ec[Reg.ledBright])   dir \(ec[Reg.ledDir])   color \(rgb(ec, Reg.ledColor))
-    LED zones 1-4  \(zones)   (last written to EC; run 'led restore' if the keyboard differs)
+    \(Reg.model) EC (read-only branch; fields from an EC dump)
+    Temperatures   CPU \(ec[Reg.cpuTemp]) °C (CTMP)   GPU? \(ec[Reg.gpuTemp]) °C (GTMP, unverified)   ETP1 \(ec[Reg.sysTemp])   \(extras) °C
+    Fans           CPU \(be16(ec, Reg.cpuFanRPM)) RPM (0x5C, big-endian)   GPU \(be16(ec, Reg.gpuFanRPM)) RPM (0x6A)
+    Power          AC \(ec[Reg.acStatus] & 0x01 == 1 ? "plugged" : "unplugged")   PL1 \(Double(be16(ec, Reg.pl1)) / 10) W   PL2 \(Double(be16(ec, Reg.pl2)) / 10) W
+    Lid            \(ec[Reg.lid] & 0x40 != 0 ? "closed" : "open")   keyboard backlight bit \(ec[Reg.kbBacklight] & 0x01)
+    Mode bytes     ACTP 0x6D = \(hex(ec[Reg.modeCandidateA]))   BTMD 0x70 = \(hex(ec[Reg.modeCandidateB]))   (candidates, meaning unknown: no mode or fan control here)
     """)
 }
 
