@@ -57,10 +57,7 @@ struct MainView: View {
         .ignoresSafeArea()  // header shares the row with the window buttons, as in NitroSense
         .preferredColorScheme(.dark)
         .animation(.easeOut(duration: 0.15), value: overlay)
-        .onAppear {
-            model.requestTrustedRead()
-            model.requestBatteryRead()
-        }
+        .onAppear { model.requestTrustedRead() }
     }
 }
 
@@ -673,7 +670,7 @@ struct MenuBarLabel: View {
     let model: NitroModel
 
     var body: some View {
-        if model.connected {
+        if model.connected, model.snapshot.fromEC {
             Text(model.gpuTemp.map { "\(model.snapshot.cpuTemp)° · \($0)°" } ?? "\(model.snapshot.cpuTemp)°")
         } else {
             Image(systemName: "fan.slash")

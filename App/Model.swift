@@ -148,8 +148,11 @@ final class NitroModel {
     private var rmResume: DispatchWorkItem?
     private let rtxFastInterval = 5.0, rtxSlowInterval = 60.0
     private var timer: Timer?
-    private var wantsTrustedRead = false
-    private var wantsBatteryRead = false
+    // A window just asked, but nitrod's answer about what it can do was not in yet. Good for a few seconds only: later nobody
+    // is looking any more, and the firmware is not to be asked by itself.
+    private var wantsTrustedRead = Date.distantPast
+    private var wantsBatteryRead = Date.distantPast
+    private let wantsLifetime = 10.0
     private var clearAction: DispatchWorkItem?
 
     init(preview: Bool = false) {
@@ -230,15 +233,19 @@ final class NitroModel {
         sampleRTX(olderThan: rtxFastSampling ? rtxFastInterval : rtxSlowInterval)
     }
 
-    func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false, asksFirmware: true) }
+    func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false, isWrite: true, asksFirmware: true) }
 
-    func setPower(_ mode: String) { send(["cmd": "power", "mode": mode], isStatus: false, asksFirmware: true) }
+    func setPower(_ mode: String) { send(["cmd": "power", "mode": mode], isStatus: false, isWrite: true, asksFirmware: true) }
 
-    func readFirmware() { send(["cmd": "firmware"], isStatus: false, asksFirmware: true) }
+    // The button: everything the firmware can tell, the charge limit included.
+    func readFirmware() {
+        send(["cmd": "firmware"], isStatus: false, asksFirmware: true)
+        requestBatteryRead()
+    }
 
-    func reapply() { send(["cmd": "apply"], isStatus: false) }
+    func reapply() { send(["cmd": "apply"], isStatus: false, isWrite: true) }
 
-    func setBatteryLimit(_ on: Bool) { send(["cmd": "battery", "mode": on ? "on" : "off"], isStatus: false) }
+    func setBatteryLimit(_ on: Bool) { send(["cmd": "battery", "mode": on ? "on" : "off"], isStatus: false, isWrite: true) }
 
     // A window or the gear menu opens: ask the firmware for the charge limit. If nitrod's answer about what it can do is
     // not in yet, the next status reply does it. Never at launch by itself, and never from config.json.
@@ -246,15 +253,15 @@ final class NitroModel {
         if control.daemonKnowsControls, control.batteryWMI {
             send(["cmd": "battery"], isStatus: false)
         } else {
-            wantsBatteryRead = true
+            wantsBatteryRead = Date()
         }
     }
 
     // A window opens: refresh what the firmware says, but only on a machine where these calls already answered once. The
     // first read is always a click on Read firmware. Waits for the next status reply to know.
-    func requestTrustedRead() { wantsTrustedRead = true }
+    func requestTrustedRead() { wantsTrustedRead = Date() }
 
-    private func send(_ request: [String: Any], isStatus: Bool, asksFirmware: Bool = false) {
+    private func send(_ request: [String: Any], isStatus: Bool, isWrite: Bool = false, asksFirmware: Bool = false) {
         let payload = try? JSONSerialization.data(withJSONObject: request)
         queue.async {
             var data: Data?
@@ -265,7 +272,7 @@ final class NitroModel {
             } catch {
                 failure = "\(error)"
             }
-            Task { @MainActor in self.apply(replyData: data, failure: failure, isStatus: isStatus, asksFirmware: asksFirmware) }
+            Task { @MainActor in self.apply(replyData: data, failure: failure, isStatus: isStatus, isWrite: isWrite, asksFirmware: asksFirmware) }
         }
     }
 
@@ -278,7 +285,7 @@ final class NitroModel {
         DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
     }
 
-    private func apply(replyData: Data?, failure: String?, isStatus: Bool, asksFirmware: Bool) {
+    private func apply(replyData: Data?, failure: String?, isStatus: Bool, isWrite: Bool, asksFirmware: Bool) {
         guard let replyData, let reply = try? JSONSerialization.jsonObject(with: replyData) as? [String: Any] else {
             connected = false
             error = failure ?? "no reply from nitrod"
@@ -298,8 +305,8 @@ final class NitroModel {
         error = nil
         if let warning = reply["warning"] as? String {
             showAction(warning, warning: true)
-        } else if !isStatus {
-            actionMessage = nil
+        } else if isWrite {
+            actionMessage = nil  // a read never clears what the last click answered
         }
         if let cfg = reply["config"] as? [String: Any], let decoded = try? NitroConfig().merged(with: cfg), decoded != config {
             config = decoded
@@ -318,14 +325,16 @@ final class NitroModel {
                                       rtxLoad: rtxLoad, rtxPower: gpuPower))
                 if history.count > 150 { history.removeFirst(history.count - 150) }
             }
+        } else if isStatus {
+            snapshot = Snapshot()  // nitrod could not read the EC: the last numbers are no longer known to be true
         }
-        if isStatus, wantsBatteryRead, control.daemonKnowsControls, control.batteryWMI {
-            wantsBatteryRead = false
+        if isStatus, Date().timeIntervalSince(wantsBatteryRead) < wantsLifetime, control.daemonKnowsControls, control.batteryWMI {
+            wantsBatteryRead = .distantPast
             send(["cmd": "battery"], isStatus: false)
         }
-        if isStatus, wantsTrustedRead, control.firmwareReadOK, control.canRead {
-            wantsTrustedRead = false
-            readFirmware()
+        if isStatus, Date().timeIntervalSince(wantsTrustedRead) < wantsLifetime, control.firmwareReadOK, control.canRead {
+            wantsTrustedRead = .distantPast
+            send(["cmd": "firmware"], isStatus: false, asksFirmware: true)
         }
     }
 

@@ -132,6 +132,12 @@ do {
         printModeState(try ec.modeState())
     case "firmware":
         printFirmware(FirmwareReading(ec))
+        do {
+            let (on, raw) = try batteryLimitStatus(ec)
+            print("Charge limit   \(on ? "on" : "off")   (WMBE 0x14 reply \(raw.map { hex($0) }.joined(separator: " ")))")
+        } catch {
+            print("Charge limit   not readable (\(error))")
+        }
     case "fan":
         guard args.count == 2 else { fail(usage) }
         switch args[1] {

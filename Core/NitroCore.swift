@@ -335,8 +335,9 @@ struct BatteryLimitReading: Codable, Equatable {
 
 // MARK: - Every GET at once
 
-// What the firmware answers to the GET calls, with the raw replies. Taken only on request: by hand, by a click in the app,
-// after a write, or when re-applying a setting the user chose.
+// What the firmware answers to the GET calls of the gaming WMI, with the raw replies. Taken only on request: by hand, by a click
+// in the app, after a write, or when re-applying a setting the user chose. The charge limit is apart: nothing that runs by
+// itself may ask for it (BatteryLimitReading).
 struct FirmwareReading: Codable, Equatable {
     var at = Date()
     var fanCPU: Int?
@@ -344,7 +345,6 @@ struct FirmwareReading: Codable, Equatable {
     var profile: Int?
     var supportedProfiles: Int?
     var keyboard: [Int]?        // 0x15 reply: gmReturn, mode, speed, brightness, 0, direction, R, G, B... (Linuwu-Sense's layout)
-    var batteryLimit: Bool?
     var raw: [String: [Int]] = [:]
     var errors: [String] = []
 
@@ -353,11 +353,11 @@ struct FirmwareReading: Codable, Equatable {
     init(_ ec: NitroEC) {
         var raw: [String: [Int]] = [:]
         var errors: [String] = []
-        func ask(_ label: String, minBytes: Int, statusAt: Int = 0, statusBytes: Int = 1, _ call: () throws -> [UInt8]) -> [UInt8]? {
+        func ask(_ label: String, minBytes: Int, _ call: () throws -> [UInt8]) -> [UInt8]? {
             do {
                 let reply = try call()
                 raw[label] = reply.map(Int.init)
-                return try checkedFirmware(reply, label, minBytes: minBytes, statusAt: statusAt, statusBytes: statusBytes)
+                return try checkedFirmware(reply, label, minBytes: minBytes)
             } catch {
                 errors.append("\(error)")
                 return nil
@@ -368,7 +368,6 @@ struct FirmwareReading: Codable, Equatable {
         if let r = ask("17 0B profile", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscPlatformProfile]) }) { profile = Int(r[1]) }
         if let r = ask("17 0A supported", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscSupportedProfiles]) }) { supportedProfiles = Int(r[1]) }
         if let r = ask("15 01 keyboard", minBytes: 1, { try ec.wmbh(GamingWMI.getKBBacklight, [1]) }) { keyboard = r.map(Int.init) }
-        if let r = ask("WMBE 14 battery", minBytes: 4, statusAt: 1, statusBytes: 2, { try ec.wmbe(GamingWMI.batteryGet, [1, 1]) }) { batteryLimit = r[3] == 1 }
         self.raw = raw
         self.errors = errors
     }
@@ -389,7 +388,6 @@ func printFirmware(_ reading: FirmwareReading) {
     } else {
         print("Keyboard       not readable")
     }
-    print("Charge limit   \(reading.batteryLimit.map { $0 ? "on" : "off" } ?? "not readable")")
     print("Raw replies:")
     for (label, bytes) in reading.raw.sorted(by: { $0.key < $1.key }) {
         print("  \(label): \(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))")

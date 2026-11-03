@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.center()
             window = w
         }
-        model.requestBatteryRead()  // also when a closed window comes back: SwiftUI does not always say it appeared again
+        model.requestBatteryRead()  // here and not in the view: this also runs when a closed window comes back
         model.rtxFastSampling = true
         model.sampleRTXNow()
         hideDockIcon?.cancel()

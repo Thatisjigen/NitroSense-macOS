@@ -147,10 +147,6 @@ final class Daemon {
         let reading = FirmwareReading(ec)
         firmware = reading
         lastFirmwareRead = Date()
-        if let on = reading.batteryLimit, let raw = reading.raw["WMBE 14 battery"] {
-            batteryLimit = BatteryLimitReading(on: on, raw: raw)
-            lastBatteryRead = Date()
-        }
         if (reading.fanCPU != nil && reading.fanGPU != nil) || reading.profile != nil, !config.firmwareReadOK {
             config.firmwareReadOK = true
             save()

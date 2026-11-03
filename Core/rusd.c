@@ -53,12 +53,13 @@
 #define RM_HEADERS_VERSION "615.78.08"
 
 enum { SEL_ESC = 1, SEL_BINDFD = 3 };
-enum { STEP_OK, STEP_CLIENT, STEP_CARD, STEP_VERSION, STEP_ROOT, STEP_ID, STEP_DEVICE, STEP_SUBDEVICE, STEP_ALLOC, STEP_MAP, STEP_EMPTY };
+enum { STEP_OK, STEP_CLIENT, STEP_QUERY, STEP_CARD, STEP_VERSION, STEP_ROOT, STEP_ID, STEP_DEVICE, STEP_SUBDEVICE, STEP_ALLOC, STEP_MAP, STEP_EMPTY };
 
 const char *nitroRUSDStepName(int32_t step) {
     switch (step) {
     case STEP_OK: return "read";
     case STEP_CLIENT: return "no NVAccel user client: is the RTX driver up?";
+    case STEP_QUERY: return "the driver did not answer: is the RTX up?";
     case STEP_CARD: return "the driver reports no card";
     case STEP_VERSION: return "the driver's RM is not " RM_HEADERS_VERSION ": this build does not know its page layout";
     case STEP_ROOT: return "no RM client";
@@ -127,8 +128,8 @@ void nitroRUSDSample(NitroRUSDSample *out) {
     nv_ioctl_rm_api_version_t version;
     memset(&version, 0, sizeof version);
     version.cmd = NV_RM_API_VERSION_CMD_QUERY;
-    if (esc(&ctl, NV_ESC_CHECK_VERSION_STR, &version, sizeof version) || strncmp(version.versionString, RM_HEADERS_VERSION, sizeof version.versionString))
-        FAIL(STEP_VERSION, 0);
+    if (esc(&ctl, NV_ESC_CHECK_VERSION_STR, &version, sizeof version)) FAIL(STEP_QUERY, 0);
+    if (strncmp(version.versionString, RM_HEADERS_VERSION, sizeof version.versionString)) FAIL(STEP_VERSION, 0);
 
     nv_ioctl_card_info_t card;
     memset(&card, 0, sizeof card);
