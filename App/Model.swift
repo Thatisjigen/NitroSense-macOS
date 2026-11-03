@@ -37,6 +37,7 @@ struct Sample {
     let cpuPower: Double?
     let rtxLoad: Int?
     let rtxPower: Double?
+    var igpuLoad: Int? = nil
 }
 
 // What nitrod says about the firmware controls. Nothing here comes from a guess: until a reading exists, a control shows no
@@ -131,6 +132,7 @@ final class NitroModel {
     var actionIsWarning = false
     var history: [Sample] = []   // last 5 min
     var cpuLoad: Int?
+    var igpuLoad: Int?         // Iris Xe active %, from nitrod (powermetrics "GPU Active")
     var cpuPower: Double?      // CPU package W from nitrod (powermetrics)
     var batteryPower: Double?  // whole machine W while on battery
     var rtxLoad: Int?
@@ -328,6 +330,7 @@ final class NitroModel {
             if isStatus {
                 cpuLoad = loadMeter.sample() ?? cpuLoad
                 cpuPower = reply["cpuPower"] as? Double
+                igpuLoad = (reply["igpuActive"] as? Double).map { Int($0.rounded()) }
                 batteryPower = batteryDischargeWatts()
                 history.append(Sample(date: Date(), cpuTemp: snapshot.cpuTemp, gpuTemp: gpuTemp, cpuLoad: cpuLoad, cpuPower: cpuPower,
                                       rtxLoad: rtxLoad, rtxPower: gpuPower))

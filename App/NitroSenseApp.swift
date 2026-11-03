@@ -176,6 +176,19 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
     ready.control.gamingWMI = true
     ready.control.firmwareReadOK = true
     ready.control.firmware = reading
+    var customReading = reading
+    customReading.fanCPU = 3
+    customReading.fanGPU = 3
+    customReading.usbCharge = 10
+    customReading.kbTimeout = false
+    let custom = NitroModel(preview: true)  // the manual duty, and the settings the firmware may answer for
+    custom.config = model.config
+    custom.snapshot = model.snapshot
+    custom.rtx = model.rtx
+    custom.rtxLoad = model.rtxLoad
+    custom.igpuLoad = 12
+    custom.control = ready.control
+    custom.control.firmware = customReading
     let busy = NitroModel(preview: true)  // 5 min of made-up samples to check the hover tooltip
     busy.config = model.config
     busy.snapshot = model.snapshot
@@ -191,6 +204,8 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
         ("monitoring-hover", AnyView(MonitoringPanel().frame(width: 680, height: 300)), busy),
         ("main", AnyView(MainView()), model),
         ("main-ready", AnyView(MainView()), ready),
+        ("main-custom", AnyView(MainView()), custom),
+        ("settings-custom", AnyView(SettingsMenu().background(Color(white: 0.16))), custom),
         ("settings", AnyView(SettingsMenu().background(Color(white: 0.16))), model),
         ("settings-ready", AnyView(SettingsMenu().background(Color(white: 0.16))), ready),
         ("menu", AnyView(MenuContent()), model),

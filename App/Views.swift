@@ -1,7 +1,6 @@
 // Main window laid out like Acer NitroSense 3 (AN515-57): header bar, Fan Control panel with two fan dials, Power Plan and
 // Monitoring panels below. The gear opens a settings menu. On the ANV15-52
-// only what can work is clickable (Auto and Max, the three power modes, marked unverified, and the login item); the rest
-// says why it is not there.
+// only what can work is shown: Auto, Max and Custom, the three power modes, and the settings the firmware answers for.
 
 import IOKit.ps
 import ServiceManagement
@@ -13,7 +12,7 @@ func tempColor(_ t: Int) -> Color {
 
 enum Overlay { case none, curve }
 
-let unverifiedFirmwareHelp = "Goes through the firmware's own mode route, TUGM and then _Q30, as on Linux for this model. It has not been tried on this board yet: the state is read back from EC FANT, and a mismatch shows as a warning."
+let unverifiedFirmwareHelp = "Goes through the firmware's own mode route, TUGM and then _Q30, and is read back from EC FANT. Quiet can stop the fans when idle."
 let fanFirmwareHelp = "Goes through the firmware's gaming WMI and is read back. On this board Max speeds the fans up."
 
 // MARK: - Main window
@@ -281,8 +280,6 @@ struct PowerPlanPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 12).padding(.bottom, 6)
             }
-        } accessory: {
-            UnverifiedTag(help: unverifiedFirmwareHelp)
         }
     }
 
@@ -351,6 +348,9 @@ struct MonitoringPanel: View {
                            temp: model.gpuTemp, load: model.rtxLoad, power: model.gpuPower, detail: model.gpuDetail)
                     .help("Load from the IORegistry (NVAccel). Temperature, power and clock from RM's shared data page, every 5 s with this window open, every minute otherwise. The Iris Xe publishes no real load figure, so there is none here. "
                           + (model.gpuTemp == nil ? "No RTX numbers now: \(model.gpuProblem)." : ""))
+                MonitorRow(name: "Iris Xe", times: h.map(\.date), temps: h.map { _ in -1 }, loads: h.map { $0.igpuLoad ?? -1 },
+                           powers: h.map { _ in -1 }, temp: nil, load: model.igpuLoad, power: nil)
+                    .help("Share of time the Iris Xe is active, from powermetrics (GPU Active). Its power is inside the CPU figure; it has no temperature of its own.")
             }
             .padding(.horizontal, 12)
             .padding(.top, 6)
@@ -771,10 +771,8 @@ struct MenuContent: View {
                     }
                 }
             }
-            HStack(spacing: 6) {
-                UnverifiedTag(help: unverifiedFirmwareHelp)
-                Text(model.control.fanBlockedReason ?? model.control.modeBlockedReason ?? "Power modes not yet proven on this board")
-                    .font(.system(size: 10)).foregroundStyle(NS.dim)
+            if let reason = model.control.fanBlockedReason ?? model.control.modeBlockedReason {
+                Text(reason).font(.system(size: 10)).foregroundStyle(NS.dim)
             }
             Divider().overlay(Color(white: 0.25))
             HStack {

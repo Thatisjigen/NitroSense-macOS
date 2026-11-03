@@ -36,15 +36,18 @@ func log(_ message: String) {
 }
 
 // CPU package power from a long-running `powermetrics --samplers cpu_power` child
-// ("Intel energy model derived package power (CPUs+GT+SA): 26.57W"). Restarts it if it exits.
+// ("Intel energy model derived package power (CPUs+GT+SA): 26.57W", and "GPU Active: 4.07%" for the Iris Xe, a hardware residency
+// that does not depend on the driver's statistics, which stay at 0 here). Restarts it if it exits.
 final class PowerMeter {
     private var process: Process?
     private var buffer = Data()
     private let onSample: (Double) -> Void
+    private let onGPUActive: (Double) -> Void
     private var stopped = false
 
-    init(onSample: @escaping (Double) -> Void) {
+    init(onSample: @escaping (Double) -> Void, onGPUActive: @escaping (Double) -> Void) {
         self.onSample = onSample
+        self.onGPUActive = onGPUActive
     }
 
     func start() {
@@ -61,6 +64,13 @@ final class PowerMeter {
             while let nl = self.buffer.firstIndex(of: 0x0A) {
                 let line = String(decoding: self.buffer[self.buffer.startIndex..<nl], as: UTF8.self)
                 self.buffer.removeSubrange(self.buffer.startIndex...nl)
+                if line.hasPrefix("GPU Active:") {
+                    let value = line.dropFirst("GPU Active:".count).trimmingCharacters(in: .whitespaces)
+                    if let percent = Double(value.replacingOccurrences(of: "%", with: "")) {
+                        DispatchQueue.main.async { self.onGPUActive(percent) }
+                    }
+                    continue
+                }
                 guard line.hasPrefix("Intel energy model derived package power"),
                       let value = line.split(separator: ":").last.map({ $0.trimmingCharacters(in: .whitespaces) }),
                       let watts = Double(value.replacingOccurrences(of: "W", with: "")) else { continue }
@@ -101,10 +111,15 @@ final class Daemon {
     var lastBatteryRead = Date.distantPast
     var cpuPower: Double?
     var cpuPowerAt = Date.distantPast
-    lazy var powerMeter = PowerMeter { [weak self] watts in
+    var igpuActive: Double?
+    var igpuActiveAt = Date.distantPast
+    lazy var powerMeter = PowerMeter(onSample: { [weak self] watts in
         self?.cpuPower = watts
         self?.cpuPowerAt = Date()
-    }
+    }, onGPUActive: { [weak self] percent in
+        self?.igpuActive = percent
+        self?.igpuActiveAt = Date()
+    })
 
     init(ec: NitroEC) {
         self.ec = ec
@@ -252,6 +267,7 @@ final class Daemon {
         }
         if let d = try? ec.dump() { reply["ec"] = d.map { Int($0) } }
         if let cpuPower, Date().timeIntervalSince(cpuPowerAt) < 6 { reply["cpuPower"] = cpuPower }
+        if let igpuActive, Date().timeIntervalSince(igpuActiveAt) < 6 { reply["igpuActive"] = igpuActive }
         var control: [String: Any] = ["gamingWMI": gamingWMI, "batteryWMI": batteryWMI, "firmwareReadOK": config.firmwareReadOK]
         if let batteryLimit, let data = try? JSONEncoder().encode(batteryLimit), let obj = try? JSONSerialization.jsonObject(with: data) {
             control["batteryLimit"] = obj
