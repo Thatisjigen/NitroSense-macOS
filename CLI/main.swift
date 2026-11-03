@@ -11,7 +11,7 @@ usage: nitroctl [status | dump | read <offset> | watch [seconds] | ecdiff | mode
        sudo nitroctl kb status
        sudo nitroctl battery limit on|off|status
        sudo nitroctl wmbh <op> [hex bytes...]   (only the exact GET calls of this branch pass)
-       nitroctl daemon [status | apply | firmware | fan auto|max | power quiet|balance|performance] [--json]
+       nitroctl daemon [status | apply | firmware | fan auto|max | power quiet|balance|performance | battery [on|off]] [--json]
 """
 
 func fail(_ message: String) -> Never {
@@ -86,7 +86,7 @@ func ecDiff(_ ec: NitroEC) throws -> Never {
     }
 }
 
-// nitroctl daemon [status | apply | firmware | fan <mode> | power <mode>]   talk to nitrod (no sudo; admin group)
+// nitroctl daemon [status | apply | firmware | fan <mode> | power <mode> | battery [on|off]]   talk to nitrod (no sudo; admin group)
 if args.first == "daemon" {
     do {
         let rawJSON = args.contains("--json")

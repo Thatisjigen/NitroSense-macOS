@@ -320,9 +320,17 @@ func batteryLimitStatus(_ ec: NitroEC) throws -> (on: Bool, raw: [UInt8]) {
     return (raw[3] == 1, raw)
 }
 
-// The MOF of this firmware: uReturn (2 bytes), uReservedOut (2 bytes).
+// The MOF of this firmware gives uReturn as 2 bytes, but only the first has been seen at 0 on this board (an 'off'
+// through the battery-limit kext): that is what is checked, and the read-back after it decides.
 func setBatteryLimit(_ ec: NitroEC, _ on: Bool) throws {
-    _ = try checkedFirmware(try ec.wmbe(GamingWMI.batterySet, [0x01, 0x01, on ? 1 : 0]), "SetBatteryHealthControl", statusBytes: 2)
+    _ = try checkedFirmware(try ec.wmbe(GamingWMI.batterySet, [0x01, 0x01, on ? 1 : 0]), "SetBatteryHealthControl")
+}
+
+// The last answer of WMBE 0x14, which is the only truth about the limit: it lives in the firmware, not in config.json.
+struct BatteryLimitReading: Codable, Equatable {
+    var on: Bool
+    var raw: [Int]
+    var at = Date()
 }
 
 // MARK: - Every GET at once

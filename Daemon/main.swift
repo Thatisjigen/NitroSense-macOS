@@ -7,13 +7,16 @@
 //   {"cmd":"fan","mode":"auto|max"}  -> SetGamingFanBehavior, then read back; the choice is remembered
 //   {"cmd":"power","mode":"quiet|balance|performance"} -> SetGamingMiscSetting 0x0B, then read back; the choice is remembered
 //     (both refused until the matching GET has answered: a write that cannot be read back proves nothing)
+//   {"cmd":"battery"}                -> reads the 80 % charge limit (WMBE 0x14), once every few seconds at most
+//   {"cmd":"battery","mode":"on|off"} -> sets it (WMBE 0x15) and reads it back; works with the battery-limit kext and SSDT too
 //   {"cmd":"apply"}                  -> re-apply what the user chose
 //
 // Nothing has been tested on this board, so nitrod never calls the firmware by itself until the user chose a setting with
 // this version: no write, and no read either, at start or at wake. After that it re-applies only that choice, at start
 // and after wake: it reads first and writes only if the firmware moved. There is no curve and no failsafe: in Auto the EC
 // keeps its own fan control, and Max can only cool more. When it stops, it brings the fans back to Auto if it took them off.
-// No byte of the EC is written, and the charge limit stays with 'sudo nitroctl battery limit on|off'.
+// No byte of the EC is written. The charge limit is never re-applied at all: the firmware keeps it across reboots, so it
+// changes only when the user asks for it, and what is reported comes from the firmware's reply, never from config.json.
 
 import Foundation
 import IOKit
@@ -88,6 +91,8 @@ final class Daemon {
     var lastFirmwareRead = Date.distantPast
     var lastFirmwareCommand = Date.distantPast
     var fanOffAuto = false              // the fans are off Auto because of this daemon
+    var batteryLimit: BatteryLimitReading?
+    var lastBatteryRead = Date.distantPast
     var cpuPower: Double?
     var cpuPowerAt = Date.distantPast
     lazy var powerMeter = PowerMeter { [weak self] watts in
@@ -121,11 +126,31 @@ final class Daemon {
     }
 
     var gamingWMI: Bool { nitroECOffers("NitroEC Gaming WMI") }
+    var batteryWMI: Bool { nitroECOffers("NitroEC Battery WMI") }
+
+    // The firmware's answer, or the error. A failed read forgets the last answer: it may no longer be true.
+    @discardableResult
+    func readBatteryLimit() -> String? {
+        lastBatteryRead = Date()
+        do {
+            let (on, raw) = try batteryLimitStatus(ec)
+            batteryLimit = BatteryLimitReading(on: on, raw: raw.map(Int.init))
+            return nil
+        } catch {
+            batteryLimit = nil
+            log("battery limit read: \(error)")
+            return "\(error)"
+        }
+    }
 
     func readFirmware() {
         let reading = FirmwareReading(ec)
         firmware = reading
         lastFirmwareRead = Date()
+        if let on = reading.batteryLimit, let raw = reading.raw["WMBE 14 battery"] {
+            batteryLimit = BatteryLimitReading(on: on, raw: raw)
+            lastBatteryRead = Date()
+        }
         if (reading.fanCPU != nil && reading.fanGPU != nil) || reading.profile != nil, !config.firmwareReadOK {
             config.firmwareReadOK = true
             save()
@@ -192,7 +217,10 @@ final class Daemon {
         }
         if let d = try? ec.dump() { reply["ec"] = d.map { Int($0) } }
         if let cpuPower, Date().timeIntervalSince(cpuPowerAt) < 6 { reply["cpuPower"] = cpuPower }
-        var control: [String: Any] = ["gamingWMI": gamingWMI, "firmwareReadOK": config.firmwareReadOK]
+        var control: [String: Any] = ["gamingWMI": gamingWMI, "batteryWMI": batteryWMI, "firmwareReadOK": config.firmwareReadOK]
+        if let batteryLimit, let data = try? JSONEncoder().encode(batteryLimit), let obj = try? JSONSerialization.jsonObject(with: data) {
+            control["batteryLimit"] = obj
+        }
         if let state = try? ec.modeState() { control["modeState"] = state.map { Int($0) } }
         if let firmware, let data = try? JSONEncoder().encode(firmware), let obj = try? JSONSerialization.jsonObject(with: data) {
             control["firmware"] = obj
@@ -259,11 +287,48 @@ final class Daemon {
                 log("power \(mode): \(error)")
                 return refused("power \(mode): \(error)")
             }
+        case "battery":
+            guard batteryWMI else {
+                return ["ok": false, "error": "the loaded NitroEC.kext and SSDT-NITRO offer no battery WMI: they need the build of branch anv15-52-battery or later, and a reboot"]
+            }
+            guard let mode = request["mode"] as? String else {
+                let error = Date().timeIntervalSince(lastBatteryRead) >= minFirmwareReadInterval ? readBatteryLimit() : nil
+                var reply = statusReply()
+                if let error {
+                    reply["ok"] = false
+                    reply["error"] = "reading the charge limit: \(error)"
+                }
+                return reply
+            }
+            guard ["on", "off"].contains(mode) else { return ["ok": false, "error": "battery mode must be on or off"] }
+            guard commandAllowedNow() else { return tooSoon() }
+            if batteryLimit == nil, let error = readBatteryLimit() {
+                return ["ok": false, "error": "not writing the charge limit: the firmware did not answer the read (\(error))"]
+            }
+            let wanted = mode == "on"
+            do {
+                try setBatteryLimit(ec, wanted)
+            } catch {
+                log("charge limit \(mode): \(error)")
+                readBatteryLimit()
+                var reply = statusReply()
+                reply["ok"] = false
+                reply["error"] = "charge limit \(mode): \(error)"
+                return reply
+            }
+            let readBackError = readBatteryLimit()
+            log("charge limit: \(mode), asked by a client; read back: \(batteryLimit.map { $0.on ? "on" : "off" } ?? "no answer")")
+            var reply = statusReply()
+            if batteryLimit?.on != wanted {
+                reply["ok"] = false
+                reply["error"] = "the firmware accepted charge limit \(mode) but the read-back says \(batteryLimit.map { $0.on ? "on" : "off" } ?? "nothing: \(readBackError ?? "")")"
+            }
+            return reply
         case "set":
             // The upstream way of changing settings. An older app may still send it: nothing it asks for exists on this board.
-            return ["ok": false, "error": "nitrod does not take config patches on the \(Reg.model): use the fan and power commands; the charge limit is 'sudo nitroctl battery limit on|off'"]
+            return ["ok": false, "error": "nitrod does not take config patches on the \(Reg.model): use the fan, power and battery commands"]
         default:
-            return ["ok": false, "error": "cmd must be status, firmware, fan, power or apply"]
+            return ["ok": false, "error": "cmd must be status, firmware, fan, power, battery or apply"]
         }
     }
 
