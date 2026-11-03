@@ -46,7 +46,9 @@ struct ControlState: Equatable {
     var daemonGone = false
     var daemonKnowsControls = false
     var gamingWMI = false
+    var batteryWMI = false
     var firmwareReadOK = false
+    var batteryLimit: BatteryLimitReading?
     var modeState: [UInt8]?
     var firmware: FirmwareReading?
 
@@ -67,6 +69,16 @@ struct ControlState: Equatable {
         if let reason = readBlockedReason { return reason }
         if firmware == nil { return "press Read firmware first" }
         return can ? nil : "the firmware did not answer the \(what) read"
+    }
+
+    // The charge limit needs only what the battery-limit kext and SSDT already offer, so it does not wait for a reboot.
+    var canSetBatteryLimit: Bool { daemonKnowsControls && batteryWMI && batteryLimit != nil }
+
+    var batteryBlockedReason: String? {
+        if daemonGone { return "nitrod is not reachable" }
+        if !daemonKnowsControls { return "needs the nitrod of this build" }
+        if !batteryWMI { return "the loaded kext and SSDT offer no battery WMI" }
+        return batteryLimit == nil ? "not read yet" : nil
     }
 
     var fanBlockedReason: String? { writeBlockedReason(canSetFan, "fan") }
@@ -129,6 +141,7 @@ final class NitroModel {
     private let queue = DispatchQueue(label: "nitro.socket")
     private var timer: Timer?
     private var wantsTrustedRead = false
+    private var wantsBatteryRead = false
     private var clearAction: DispatchWorkItem?
 
     init(preview: Bool = false) {
@@ -161,19 +174,31 @@ final class NitroModel {
         }
     }
 
-    func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false) }
+    func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false, asksFirmware: true) }
 
-    func setPower(_ mode: String) { send(["cmd": "power", "mode": mode], isStatus: false) }
+    func setPower(_ mode: String) { send(["cmd": "power", "mode": mode], isStatus: false, asksFirmware: true) }
 
-    func readFirmware() { send(["cmd": "firmware"], isStatus: false) }
+    func readFirmware() { send(["cmd": "firmware"], isStatus: false, asksFirmware: true) }
 
     func reapply() { send(["cmd": "apply"], isStatus: false) }
+
+    func setBatteryLimit(_ on: Bool) { send(["cmd": "battery", "mode": on ? "on" : "off"], isStatus: false) }
+
+    // A window or the gear menu opens: ask the firmware for the charge limit. If nitrod's answer about what it can do is
+    // not in yet, the next status reply does it. Never at launch by itself, and never from config.json.
+    func requestBatteryRead() {
+        if control.daemonKnowsControls, control.batteryWMI {
+            send(["cmd": "battery"], isStatus: false)
+        } else {
+            wantsBatteryRead = true
+        }
+    }
 
     // A window opens: refresh what the firmware says, but only on a machine where these calls already answered once. The
     // first read is always a click on Read firmware. Waits for the next status reply to know.
     func requestTrustedRead() { wantsTrustedRead = true }
 
-    private func send(_ request: [String: Any], isStatus: Bool) {
+    private func send(_ request: [String: Any], isStatus: Bool, asksFirmware: Bool = false) {
         let payload = try? JSONSerialization.data(withJSONObject: request)
         queue.async {
             var data: Data?
@@ -184,7 +209,7 @@ final class NitroModel {
             } catch {
                 failure = "\(error)"
             }
-            Task { @MainActor in self.apply(replyData: data, failure: failure, isStatus: isStatus) }
+            Task { @MainActor in self.apply(replyData: data, failure: failure, isStatus: isStatus, asksFirmware: asksFirmware) }
         }
     }
 
@@ -197,7 +222,7 @@ final class NitroModel {
         DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
     }
 
-    private func apply(replyData: Data?, failure: String?, isStatus: Bool) {
+    private func apply(replyData: Data?, failure: String?, isStatus: Bool, asksFirmware: Bool) {
         guard let replyData, let reply = try? JSONSerialization.jsonObject(with: replyData) as? [String: Any] else {
             connected = false
             error = failure ?? "no reply from nitrod"
@@ -224,7 +249,7 @@ final class NitroModel {
             config = decoded
         }
         if reply["control"] == nil { applyControl(nil) }
-        if !isStatus, reply["warning"] == nil, let errors = control.firmware?.errors, !errors.isEmpty {
+        if asksFirmware, reply["warning"] == nil, let errors = control.firmware?.errors, !errors.isEmpty {
             showAction("Firmware: \(errors.joined(separator: "; "))", warning: true)
         }
         if let ec = (reply["ec"] as? [Int])?.map({ UInt8(truncatingIfNeeded: $0) }), ec.count == 256 {
@@ -238,6 +263,10 @@ final class NitroModel {
                 if history.count > 150 { history.removeFirst(history.count - 150) }
             }
         }
+        if isStatus, wantsBatteryRead, control.daemonKnowsControls, control.batteryWMI {
+            wantsBatteryRead = false
+            send(["cmd": "battery"], isStatus: false)
+        }
         if isStatus, wantsTrustedRead, control.firmwareReadOK, control.canRead {
             wantsTrustedRead = false
             readFirmware()
@@ -249,7 +278,11 @@ final class NitroModel {
         if let dict {
             next.daemonKnowsControls = true
             next.gamingWMI = dict["gamingWMI"] as? Bool ?? false
+            next.batteryWMI = dict["batteryWMI"] as? Bool ?? false
             next.firmwareReadOK = dict["firmwareReadOK"] as? Bool ?? false
+            if let obj = dict["batteryLimit"], let data = try? JSONSerialization.data(withJSONObject: obj) {
+                next.batteryLimit = try? JSONDecoder().decode(BatteryLimitReading.self, from: data)
+            }
             next.modeState = (dict["modeState"] as? [Int])?.map { UInt8(truncatingIfNeeded: $0) }
             if let obj = dict["firmware"], let data = try? JSONSerialization.data(withJSONObject: obj) {
                 next.firmware = try? JSONDecoder().decode(FirmwareReading.self, from: data)

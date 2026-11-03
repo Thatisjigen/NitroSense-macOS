@@ -92,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             w.center()
             window = w
         }
+        model.requestBatteryRead()  // also when a closed window comes back: SwiftUI does not always say it appeared again
         hideDockIcon?.cancel()
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
@@ -164,9 +165,13 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
     reading.fanCPU = 1
     reading.fanGPU = 1
     reading.profile = 1
-    reading.batteryLimit = true
+    ready.control.batteryLimit = BatteryLimitReading(on: true, raw: [3, 0, 0, 1, 0, 0, 0, 0])
+    ready.control.batteryWMI = true
     reading.keyboard = [0, 0, 5, 100, 0, 0, 255, 255, 255]
-    ready.control = ControlState(daemonKnowsControls: true, gamingWMI: true, firmwareReadOK: true, modeState: nil, firmware: reading)
+    ready.control.daemonKnowsControls = true
+    ready.control.gamingWMI = true
+    ready.control.firmwareReadOK = true
+    ready.control.firmware = reading
     let busy = NitroModel(preview: true)  // 5 min of made-up samples to check the hover tooltip
     busy.config = model.config
     busy.snapshot = model.snapshot

@@ -57,7 +57,10 @@ struct MainView: View {
         .ignoresSafeArea()  // header shares the row with the window buttons, as in NitroSense
         .preferredColorScheme(.dark)
         .animation(.easeOut(duration: 0.15), value: overlay)
-        .onAppear { model.requestTrustedRead() }
+        .onAppear {
+            model.requestTrustedRead()
+            model.requestBatteryRead()
+        }
     }
 }
 
@@ -564,8 +567,7 @@ struct SettingsMenu: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Section("Power Settings") {
-                InfoRow(label: "Battery charge limit (80%)", value: batteryLimitText,
-                        note: "Set by hand: sudo nitroctl battery limit on|off")
+                BatteryLimitRow()
                 InfoRow(label: "USB charging when powered off", value: "not here",
                         note: "No firmware route verified on this board")
             }
@@ -596,11 +598,7 @@ struct SettingsMenu: View {
         .padding(12)
         .frame(width: 290)
         .preferredColorScheme(.dark)
-    }
-
-    private var batteryLimitText: String {
-        guard let limit = model.control.firmware?.batteryLimit else { return "not read" }
-        return limit ? "on" : "off"
+        .onAppear { model.requestBatteryRead() }
     }
 
     private var hasChoices: Bool { !model.config.userFan.isEmpty || !model.config.userMode.isEmpty }
@@ -623,6 +621,41 @@ struct SettingsMenu: View {
                 content
             }
         }
+    }
+}
+
+// The firmware's 80 % charge limit. The switch shows what the firmware last answered, and only after it answered; a click
+// asks nitrod to write it and read it back. The result stays with the firmware across reboots: nothing re-applies it.
+struct BatteryLimitRow: View {
+    @Environment(NitroModel.self) private var model
+
+    var body: some View {
+        let control = model.control
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Battery charge limit (80%)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(control.canSetBatteryLimit ? Color(white: 0.8) : NS.dim)
+                Spacer()
+                if let limit = control.batteryLimit, control.canSetBatteryLimit {
+                    HexToggle(isOn: limit.on) { model.setBatteryLimit($0) }
+                }
+            }
+            Text(note).font(.system(size: 10)).foregroundStyle(NS.dim)
+            if let message = model.actionMessage {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(model.actionIsWarning ? NS.orange : NS.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var note: String {
+        if let limit = model.control.batteryLimit {
+            return "Firmware: \(limit.on ? "on" : "off"), read \(limit.at.formatted(date: .omitted, time: .shortened))"
+        }
+        return model.control.batteryBlockedReason ?? "not read"
     }
 }
 
