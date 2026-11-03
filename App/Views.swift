@@ -171,7 +171,7 @@ struct FanControlPanel: View {
                     FanSide(name: "CPU", temp: s.fromEC ? s.cpuTemp : nil, alignment: .trailing, tempHelp: "nitrod is not reachable")
                     FanDial(rpm: s.fromEC ? s.cpuRPM : nil)
                     FanDial(rpm: s.fromEC ? s.gpuRPM : nil)
-                    FanSide(name: "GPU", temp: model.gpuTemp, alignment: .leading, tempHelp: model.gpu.tempNote)
+                    FanSide(name: "GPU", temp: model.gpuTemp, alignment: .leading, tempHelp: model.gpuProblem)
                 }
                 Spacer()
             }
@@ -316,10 +316,11 @@ struct MonitoringPanel: View {
                            powers: h.map { $0.cpuPower ?? -1 },
                            temp: model.snapshot.fromEC ? model.snapshot.cpuTemp : nil, load: model.cpuLoad, power: model.cpuPower)
                     .help("CPU power = Intel package (cores + iGPU + system agent), from powermetrics")
-                MonitorRow(name: "RTX 5050", times: h.map(\.date), temps: h.map { $0.gpuTemp ?? -1 }, loads: h.map { $0.rtxLoad ?? -1 }, powers: [],
-                           temp: model.gpuTemp, load: model.gpu.rtxLoad, power: model.gpu.rtxPower)
-                    .help("Load read from the IORegistry (NVAccel). The Iris Xe publishes no real load figure, so there is none here. "
-                          + (model.gpuTemp == nil ? "No temperature shown: \(model.gpu.tempNote ?? "no source")." : ""))
+                MonitorRow(name: "RTX 5050", times: h.map(\.date), temps: h.map { $0.gpuTemp ?? -1 }, loads: h.map { $0.rtxLoad ?? -1 },
+                           powers: h.map { $0.rtxPower ?? -1 },
+                           temp: model.gpuTemp, load: model.rtxLoad, power: model.gpuPower, detail: model.gpuDetail)
+                    .help("Load from the IORegistry (NVAccel). Temperature, power and clock from RM's shared data page, every 5 s with this window open, every minute otherwise. The Iris Xe publishes no real load figure, so there is none here. "
+                          + (model.gpuTemp == nil ? "No RTX numbers now: \(model.gpuProblem)." : ""))
             }
             .padding(.horizontal, 12)
             .padding(.top, 6)
@@ -337,6 +338,7 @@ struct MonitorRow: View {
     let temp: Int?
     let load: Int?
     let power: Double?
+    var detail: String?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -355,6 +357,9 @@ struct MonitorRow: View {
                 if !powers.isEmpty || power != nil {
                     Text(power.map { String(format: "%.1f W", $0) } ?? "-- W")
                         .font(.system(size: 15, weight: .light)).foregroundStyle(NS.yellow).monospacedDigit()
+                }
+                if let detail {
+                    Text(detail).font(.system(size: 10)).foregroundStyle(NS.dim).monospacedDigit().fixedSize()
                 }
             }
             .frame(width: 64, alignment: .trailing)
@@ -734,7 +739,10 @@ struct MenuContent: View {
         .frame(width: 330)
         .background(NS.bg)
         .preferredColorScheme(.dark)
-        .onAppear { model.requestTrustedRead() }
+        .onAppear {
+            model.requestTrustedRead()
+            model.sampleRTXNow()
+        }
     }
 
     @ViewBuilder

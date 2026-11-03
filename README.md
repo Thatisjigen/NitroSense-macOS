@@ -18,21 +18,25 @@
 >
 > The method IDs and types are in this firmware's MOF (`WQAB` in SSDT10) and `WMBH` hands each to the firmware SMI; the bit layouts come
 > from Linux's `acer-wmi` and from Linuwu-Sense **on other Acer models**: what the SMM handler does here cannot be read from ACPI.
-> **None of these writes has ever run on this board**, hence the `UNVERIFIED` tags in the app. A write needs its GET to have answered
-> first (nitrod and nitroctl refuse otherwise), and it is read back afterwards, even when it fails.
+> The two battery calls are proven on this board (read and `off`). **The gaming WMI writes have never run here**, hence the
+> `UNVERIFIED` tags in the app. A write needs its GET to have answered first (nitrod and nitroctl refuse otherwise), and it is read back
+> afterwards, even when it fails.
 > Manual fan duty, the curve, the failsafe, turbo, eco and `SetGamingKBBacklight` stay out.
 >
 > `nitrod` calls the firmware only when asked: at start and at wake it does nothing at all until the user chose a fan or power
 > setting with this version; after that it re-applies only that choice, reading first and writing only if the firmware moved. When
-> it stops it brings the fans back to Auto if it took them off, and so does the kext's `stop()`. The charge limit stays with
-> `sudo nitroctl battery limit on|off`.
+> it stops it brings the fans back to Auto if it took them off, and so does the kext's `stop()`. The charge limit is a switch in the
+> gear menu: it shows what the firmware answers, never `config.json`, it writes on a click and reads back, and nothing ever re-applies
+> it, because the firmware keeps it. It needs only `nitrod` of this branch, with the kext and SSDT of `anv15-52-battery` or later.
 >
-> The app shows RTX and Iris Xe load from the IORegistry (`NVAccel`, `IntelAccelerator`), no root. The RTX temperature has no real
-> source today (EC `GTMP` reads 0, SMCNvidiaGPU 1.6 does not recognise this NVRM), so it is hidden, and it appears by itself if
-> `kern.nvgputemp` starts reading. This keyboard is single-colour and the Fn keys drive it: the RGB panel is gone, and the new one
-> only reads. `nitroctl status`, `dump`, `read`, `watch`, `ecdiff` and `modes` need no root; `sudo nitroctl firmware` runs every GET.
-> Kext, SSDT and daemon may be of different branches: what is missing shows as unavailable. Everything below describes the upstream
-> AN515-57 version, and so do the `Scripts/*-test.sh`.
+> The app shows the RTX load from the IORegistry (`NVAccel`), no root. Temperature, power and clock come from RM's user shared data page
+> (`Core/rusd.c`, as the plain user, read only): one client is opened, read and freed in about 10 ms, every 5 s with the window open and
+> every minute otherwise, and between samples RM does not poll. `make` needs NVIDIA's open-gpu-kernel-modules headers at the driver's
+> version for this (see the `Makefile`), and at run time nothing is read if the driver reports another one. The Iris Xe has no load
+> figure, because no counter of `IntelAccelerator` moves with the desktop running on it, so none is shown. This keyboard is single-colour
+> and the Fn keys drive it: the RGB panel is gone, and the new one only reads. `nitroctl status`, `dump`, `read`, `watch`, `ecdiff` and
+> `modes` need no root; `sudo nitroctl firmware` runs every GET. Kext, SSDT and daemon may be of different branches: what is missing shows
+> as unavailable. Everything below describes the upstream AN515-57 version, and so do the `Scripts/*-test.sh`.
 
 # NitroSense for macOS
 

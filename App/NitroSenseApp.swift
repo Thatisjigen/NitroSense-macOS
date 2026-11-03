@@ -93,6 +93,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window = w
         }
         model.requestBatteryRead()  // also when a closed window comes back: SwiftUI does not always say it appeared again
+        model.rtxFastSampling = true
+        model.sampleRTXNow()
         hideDockIcon?.cancel()
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
@@ -116,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        model.rtxFastSampling = false
         // Drop the Dock icon a moment later, unless the window comes back first.
         let work = DispatchWorkItem { [weak self] in
             guard self?.window?.isVisible != true else { return }
@@ -160,7 +163,8 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
     let ready = NitroModel(preview: true)
     ready.snapshot = model.snapshot
     ready.connected = true
-    ready.gpu = model.gpu
+    ready.rtx = model.rtx
+    ready.rtxLoad = model.rtxLoad
     var reading = FirmwareReading()
     reading.fanCPU = 1
     reading.fanGPU = 1
@@ -175,12 +179,13 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
     let busy = NitroModel(preview: true)  // 5 min of made-up samples to check the hover tooltip
     busy.config = model.config
     busy.snapshot = model.snapshot
-    busy.gpu = model.gpu
+    busy.rtx = model.rtx
+    busy.rtxLoad = model.rtxLoad
     busy.history = (0..<150).map { i in
         let t = Double(i)
         return Sample(date: Date().addingTimeInterval(Double(i - 150) * 2), cpuTemp: 60 + Int(15 * sin(t / 12)), gpuTemp: nil,
                       cpuLoad: 30 + Int(25 * sin(t / 9)), cpuPower: 20 + 15 * sin(t / 10),
-                      rtxLoad: 25 + Int(20 * sin(t / 7)))
+                      rtxLoad: 25 + Int(20 * sin(t / 7)), rtxPower: 18 + 8 * sin(t / 8))
     }
     let pages: [(String, AnyView, NitroModel)] = [
         ("monitoring-hover", AnyView(MonitoringPanel().frame(width: 680, height: 300)), busy),

@@ -9,7 +9,7 @@ import SwiftUI
 
 struct Snapshot: Equatable {
     var fromEC = false        // false until the EC was read: no value below means anything then, 0 least of all
-    var cpuTemp = 0, gtmp = 0, sysTemp = 0
+    var cpuTemp = 0, sysTemp = 0
     var cpuRPM = 0, gpuRPM = 0
     var acPlugged = false
     var keyboardBit = false   // KBBL, EC 0x48 bit 0
@@ -20,7 +20,6 @@ struct Snapshot: Equatable {
     init(_ ec: [UInt8]) {
         fromEC = true
         cpuTemp = Int(ec[Reg.cpuTemp])
-        gtmp = Int(ec[Reg.gpuTemp])
         sysTemp = Int(ec[Reg.sysTemp])
         cpuRPM = be16(ec, Reg.cpuFanRPM)   // ANV15-52: big-endian
         gpuRPM = be16(ec, Reg.gpuFanRPM)
@@ -37,6 +36,7 @@ struct Sample {
     let cpuLoad: Int?
     let cpuPower: Double?
     let rtxLoad: Int?
+    let rtxPower: Double?
 }
 
 // What nitrod says about the firmware controls. Nothing here comes from a guess: until a reading exists, a control shows no
@@ -133,11 +133,20 @@ final class NitroModel {
     var cpuLoad: Int?
     var cpuPower: Double?      // CPU package W from nitrod (powermetrics)
     var batteryPower: Double?  // whole machine W while on battery
-    var gpu = GPUStats()
+    var rtxLoad: Int?
+    var rtx = RTXTelemetry(at: .distantPast)
+    var rtxFastSampling = false  // the main window is open
     var control = ControlState()
     private let loadMeter = CPULoadMeter()
 
     private let queue = DispatchQueue(label: "nitro.socket")
+    // RM calls can block on RM's locks: they keep to their own queue, one at a time, and to low rates, so that RM polls for a
+    // few milliseconds every so often and not at all in between.
+    private let rmQueue = DispatchQueue(label: "nitro.rm")
+    private var rmBusy = false
+    private var rmPaused = false
+    private var rmResume: DispatchWorkItem?
+    private let rtxFastInterval = 5.0, rtxSlowInterval = 60.0
     private var timer: Timer?
     private var wantsTrustedRead = false
     private var wantsBatteryRead = false
@@ -149,9 +158,56 @@ final class NitroModel {
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        // No RM calls around sleep or with the screens off: the driver has enough to do, and nobody is looking.
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.pauseRM() }
+            }
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.resumeRMSoon() }
+            }
+        }
     }
 
-    var gpuTemp: Int? { gpu.rtxTemp ?? (snapshot.gtmp > 0 ? snapshot.gtmp : nil) }
+    private func pauseRM() {
+        rmResume?.cancel()
+        rmPaused = true
+    }
+
+    private func resumeRMSoon() {
+        rmResume?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.rmPaused = false }
+        rmResume = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+    }
+
+    // What RM last said, while it is recent: an old reading is no reading.
+    private var rtxIsRecent: Bool { Date().timeIntervalSince(rtx.at) < rtxSlowInterval * 3 }
+    var gpuTemp: Int? { rtxIsRecent ? rtx.tempC : nil }
+    var gpuPower: Double? { rtxIsRecent ? rtx.powerW : nil }
+    var gpuDetail: String? {
+        guard rtxIsRecent, let gpc = rtx.gpcMHz else { return nil }
+        return rtx.pstate.map { "\(gpc) MHz P\($0)" } ?? "\(gpc) MHz"
+    }
+    var gpuProblem: String { rtx.problem ?? (rtxIsRecent ? "" : "not read yet") }
+
+    // The main window opened or the menu bar panel came up: fresh numbers now, if the last ones are older than the fast rate.
+    func sampleRTXNow() { sampleRTX(olderThan: rtxFastInterval) }
+
+    private func sampleRTX(olderThan interval: TimeInterval) {
+        guard !rmBusy, !rmPaused, Date().timeIntervalSince(rtx.at) >= interval else { return }
+        rmBusy = true
+        rmQueue.async {
+            let telemetry = readRTXTelemetry()
+            Task { @MainActor in
+                self.rmBusy = false
+                self.rtx = telemetry
+            }
+        }
+    }
 
     // Both fans in the same state, as the firmware last answered; nil when not read yet or when they differ.
     var currentFan: String? {
@@ -168,9 +224,10 @@ final class NitroModel {
     func refresh() {
         send(["cmd": "status"], isStatus: true)
         queue.async {
-            let stats = readGPUStats()
-            Task { @MainActor in self.gpu = stats }
+            let load = readRTXLoad()
+            Task { @MainActor in self.rtxLoad = load }
         }
+        sampleRTX(olderThan: rtxFastSampling ? rtxFastInterval : rtxSlowInterval)
     }
 
     func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false, asksFirmware: true) }
@@ -258,7 +315,7 @@ final class NitroModel {
                 cpuPower = reply["cpuPower"] as? Double
                 batteryPower = batteryDischargeWatts()
                 history.append(Sample(date: Date(), cpuTemp: snapshot.cpuTemp, gpuTemp: gpuTemp, cpuLoad: cpuLoad, cpuPower: cpuPower,
-                                      rtxLoad: gpu.rtxLoad))
+                                      rtxLoad: rtxLoad, rtxPower: gpuPower))
                 if history.count > 150 { history.removeFirst(history.count - 150) }
             }
         }
