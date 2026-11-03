@@ -8,7 +8,6 @@ enum NS {
     static let redDark = Color(red: 0.45, green: 0.05, blue: 0.04)
     static let orange = Color(red: 1.0, green: 0.45, blue: 0.16)
     static let yellow = Color(red: 1.0, green: 0.82, blue: 0.25)
-    static let iris = Color(red: 0.36, green: 0.72, blue: 1.0)  // the Iris Xe's line in the GPU graph
     static let bg = Color(white: 0.07)
     static let panel = Color(white: 0.115)
     static let panelBorder = Color(white: 0.24)

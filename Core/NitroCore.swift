@@ -158,7 +158,7 @@ func printStatus(_ ec: [UInt8]) {
     Temperatures   CPU \(ec[Reg.cpuTemp]) °C (CTMP)   ETP1 \(ec[Reg.sysTemp])   \(extras) °C
     RTX temp       \(rtxTemp)
     Fans           CPU \(be16(ec, Reg.cpuFanRPM)) RPM (0x5C, big-endian)   GPU \(be16(ec, Reg.gpuFanRPM)) RPM (0x6A)
-    GPU load       RTX \(load(gpu.rtxLoad)) (NVAccel)   Iris Xe \(load(gpu.irisLoad)) (IntelAccelerator)
+    GPU load       RTX \(load(gpu.rtxLoad)) (NVAccel); the Iris Xe publishes no real figure
     Power          AC \(ec[Reg.acStatus] & 0x01 == 1 ? "plugged" : "unplugged")   PL1 \(Double(be16(ec, Reg.pl1)) / 10) W   PL2 \(Double(be16(ec, Reg.pl2)) / 10) W
     Lid            \(ec[Reg.lid] & 0x40 != 0 ? "closed" : "open")
     Keyboard       backlight bit KBBL \(ec[Reg.kbBacklight] & 0x01) (EC 0x48 bit 0, unverified; the Fn keys drive the backlight)

@@ -180,7 +180,7 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
         let t = Double(i)
         return Sample(date: Date().addingTimeInterval(Double(i - 150) * 2), cpuTemp: 60 + Int(15 * sin(t / 12)), gpuTemp: nil,
                       cpuLoad: 30 + Int(25 * sin(t / 9)), cpuPower: 20 + 15 * sin(t / 10),
-                      rtxLoad: 25 + Int(20 * sin(t / 7)), irisLoad: 8 + Int(6 * sin(t / 5)))
+                      rtxLoad: 25 + Int(20 * sin(t / 7)))
     }
     let pages: [(String, AnyView, NitroModel)] = [
         ("monitoring-hover", AnyView(MonitoringPanel().frame(width: 680, height: 300)), busy),

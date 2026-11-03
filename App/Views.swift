@@ -304,8 +304,6 @@ struct MonitoringPanel: View {
                     Text("Loading (%)").foregroundStyle(NS.orange)
                     Text("/").foregroundStyle(NS.dim)
                     Text("Power (W)").foregroundStyle(NS.yellow)
-                    Text("/").foregroundStyle(NS.dim)
-                    Text("Iris Xe (%)").foregroundStyle(NS.iris)
                     Spacer()
                     if let w = model.batteryPower {
                         Label(String(format: "On battery: %.1f W", w), systemImage: "battery.50percent")
@@ -319,9 +317,8 @@ struct MonitoringPanel: View {
                            temp: model.snapshot.fromEC ? model.snapshot.cpuTemp : nil, load: model.cpuLoad, power: model.cpuPower)
                     .help("CPU power = Intel package (cores + iGPU + system agent), from powermetrics")
                 MonitorRow(name: "RTX 5050", times: h.map(\.date), temps: h.map { $0.gpuTemp ?? -1 }, loads: h.map { $0.rtxLoad ?? -1 }, powers: [],
-                           temp: model.gpuTemp, load: model.gpu.rtxLoad, power: model.gpu.rtxPower,
-                           secondLoads: h.map { $0.irisLoad ?? -1 }, secondLoad: model.gpu.irisLoad)
-                    .help("Load read from the IORegistry: RTX 5050 from NVAccel, Iris Xe from IntelAccelerator. "
+                           temp: model.gpuTemp, load: model.gpu.rtxLoad, power: model.gpu.rtxPower)
+                    .help("Load read from the IORegistry (NVAccel). The Iris Xe publishes no real load figure, so there is none here. "
                           + (model.gpuTemp == nil ? "No temperature shown: \(model.gpu.tempNote ?? "no source")." : ""))
             }
             .padding(.horizontal, 12)
@@ -340,16 +337,13 @@ struct MonitorRow: View {
     let temp: Int?
     let load: Int?
     let power: Double?
-    var secondLoads: [Int] = []  // the Iris Xe in the GPU row
-    var secondLoad: Int?
 
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(rangeText).font(.system(size: 10)).foregroundStyle(NS.dim).monospacedDigit()
                 ZStack(alignment: .topLeading) {
-                    HistoryGraph(temps: temps, loads: loads, powers: powers, times: times, secondLoads: secondLoads,
-                                 loadLabel: secondLoads.isEmpty ? "Load" : "RTX")
+                    HistoryGraph(temps: temps, loads: loads, powers: powers, times: times)
                     Text(name).font(.system(size: 11, weight: .medium)).foregroundStyle(NS.text).padding(6)
                 }
             }
@@ -362,27 +356,16 @@ struct MonitorRow: View {
                     Text(power.map { String(format: "%.1f W", $0) } ?? "-- W")
                         .font(.system(size: 15, weight: .light)).foregroundStyle(NS.yellow).monospacedDigit()
                 }
-                if !secondLoads.isEmpty {
-                    Text(secondLoad.map { "Iris \($0) %" } ?? "Iris -- %")
-                        .font(.system(size: 12, weight: .light)).foregroundStyle(NS.iris).monospacedDigit()
-                }
             }
             .frame(width: 64, alignment: .trailing)
         }
     }
 
     private var rangeText: String {
-        var parts: [String] = []
         let validTemps = temps.filter { $0 >= 0 }
-        if !secondLoads.isEmpty {
-            if let minT = validTemps.min(), let maxT = validTemps.max() { parts.append("Min : \(minT)°    Max : \(maxT)°") }
-            func peak(_ values: [Int]) -> String { values.filter { $0 >= 0 }.max().map { "\($0) %" } ?? "--" }
-            parts.append("Peak : \(peak(loads))    Iris : \(peak(secondLoads))")
-        } else {
-            parts.append("Min : \(validTemps.min().map { "\($0)°" } ?? "--")    Max : \(validTemps.max().map { "\($0)°" } ?? "--")")
-        }
-        if let maxW = powers.filter({ $0 >= 0 }).max() { parts.append(String(format: "Peak : %.0f W", maxW)) }
-        return parts.joined(separator: "    ")
+        var t = "Min : \(validTemps.min().map { "\($0)°" } ?? "--")    Max : \(validTemps.max().map { "\($0)°" } ?? "--")"
+        if let maxW = powers.filter({ $0 >= 0 }).max() { t += String(format: "    Peak : %.0f W", maxW) }
+        return t
     }
 }
 
@@ -392,13 +375,11 @@ struct HistoryGraph: View {
     let loads: [Int]
     var powers: [Double] = []   // -1 = no sample; scaled to max(60 W, peak)
     var times: [Date] = []
-    var secondLoads: [Int] = [] // a second load drawn as a thin line: the Iris Xe in the GPU row
-    var loadLabel = "Load"
     var capacity = 150
     @State private var hoverX: CGFloat?
     @Environment(\.snapshotMode) private var snapshotMode
 
-    private var count: Int { max(temps.count, loads.count, powers.count, secondLoads.count) }
+    private var count: Int { max(temps.count, loads.count, powers.count) }
 
     private func x0(_ width: CGFloat) -> CGFloat { width - CGFloat(count - 1) * width / CGFloat(capacity - 1) }
 
@@ -450,14 +431,6 @@ struct HistoryGraph: View {
                     }
                     ctx.stroke(line, with: .color(NS.yellow), style: StrokeStyle(lineWidth: 1.3, dash: [4, 2]))
                 }
-                if secondLoads.filter({ $0 >= 0 }).count > 1 {
-                    var line = Path()
-                    var started = false
-                    for (i, v) in secondLoads.enumerated() where v >= 0 {
-                        if started { line.addLine(to: point(i, v, secondLoads.count)) } else { line.move(to: point(i, v, secondLoads.count)); started = true }
-                    }
-                    ctx.stroke(line, with: .color(NS.iris), lineWidth: 1.2)
-                }
                 if temps.filter({ $0 >= 0 }).count > 1 {
                     var line = Path()
                     var started = false
@@ -475,7 +448,6 @@ struct HistoryGraph: View {
                     }
                     if hover < loads.count, loads[hover] >= 0 { dot(point(hover, loads[hover], loads.count), NS.orange) }
                     if hover < powers.count, powers[hover] >= 0 { dot(powerPoint(hover), NS.yellow) }
-                    if hover < secondLoads.count, secondLoads[hover] >= 0 { dot(point(hover, secondLoads[hover], secondLoads.count), NS.iris) }
                     if hover < temps.count, temps[hover] >= 0 { dot(point(hover, temps[hover], temps.count), NS.red) }
                 }
             }
@@ -507,8 +479,7 @@ struct HistoryGraph: View {
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(NS.dim)
             }
             if i < temps.count, temps[i] >= 0 { tipRow("Temp", "\(temps[i]) °C", NS.red) }
-            if i < loads.count, loads[i] >= 0 { tipRow(loadLabel, "\(loads[i]) %", NS.orange) }
-            if i < secondLoads.count, secondLoads[i] >= 0 { tipRow("Iris Xe", "\(secondLoads[i]) %", NS.iris) }
+            if i < loads.count, loads[i] >= 0 { tipRow("Load", "\(loads[i]) %", NS.orange) }
             if i < powers.count { tipRow("Power", powers[i] >= 0 ? String(format: "%.1f W", powers[i]) : "--", NS.yellow) }
         }
         .padding(.horizontal, 8)

@@ -1,8 +1,12 @@
 // GPU load and temperature for app and nitroctl: plain reads of the IORegistry and of sysctl, no root, no kext of ours.
 //
 // Load (observed on this machine): NVAccel publishes "GPU Core Utilization %", steady, and "Device
-// Utilization %", which often drops to 0 between two reads while the other one holds; IntelAccelerator publishes "Device
-// Utilization %" only. Neither publishes a temperature.
+// Utilization %", which often drops to 0 between two reads while the other one holds. Neither has a temperature.
+//
+// The Iris Xe has no load figure, so none is shown. With the desktop running on it (WindowServer compositing the
+// panel, IOSurface traffic of 2-25 MB per sample, hardwareWaitTime moving) IntelAccelerator's "Device Utilization %", its
+// units 0-5, "at cur p-state" and the IOReport channel "Overall GPU Busy" all stay at 0, while "Overall GPU total time"
+// runs. hardwareWaitTime moves, but it is what clients spend waiting, not how busy the GPU is. A 0 here would be false.
 //
 // Temperature: there is no real source of the RTX temperature today, so none is shown. EC GTMP (0x59) reads 0 under macOS
 // with the RTX on, and SMCNvidiaGPU 1.6 is loaded but reads nothing: kern.nvgpustate says that this NVRM "matches none of
@@ -15,7 +19,6 @@ import IOKit
 
 struct GPUStats: Equatable {
     var rtxLoad: Int?       // %, nil when NVAccel is not there
-    var irisLoad: Int?      // %, nil when IntelAccelerator is not there
     var rtxTemp: Int?       // °C, nil unless a source really reads
     var rtxPower: Double?   // W, nil unless a source really reads
     var tempNote: String?   // why there is no temperature, when the source says so
@@ -55,7 +58,6 @@ func readGPUStats() -> GPUStats {
     var stats = GPUStats()
     let nvaccel = acceleratorStatistics("NVAccel")
     stats.rtxLoad = percent(nvaccel, ["GPU Core Utilization %", "Device Utilization %"])
-    stats.irisLoad = percent(acceleratorStatistics("IntelAccelerator"), ["Device Utilization %"])
     if let temp = sysctlInteger("kern.nvgputemp"), (1...125).contains(temp) {
         stats.rtxTemp = temp
     } else if let temp = nvaccel?["Temperature(C)"] as? Int, (1...125).contains(temp) {

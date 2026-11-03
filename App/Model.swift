@@ -37,7 +37,6 @@ struct Sample {
     let cpuLoad: Int?
     let cpuPower: Double?
     let rtxLoad: Int?
-    let irisLoad: Int?
 }
 
 // What nitrod says about the firmware controls. Nothing here comes from a guess: until a reading exists, a control shows no
@@ -259,7 +258,7 @@ final class NitroModel {
                 cpuPower = reply["cpuPower"] as? Double
                 batteryPower = batteryDischargeWatts()
                 history.append(Sample(date: Date(), cpuTemp: snapshot.cpuTemp, gpuTemp: gpuTemp, cpuLoad: cpuLoad, cpuPower: cpuPower,
-                                      rtxLoad: gpu.rtxLoad, irisLoad: gpu.irisLoad))
+                                      rtxLoad: gpu.rtxLoad))
                 if history.count > 150 { history.removeFirst(history.count - 150) }
             }
         }
