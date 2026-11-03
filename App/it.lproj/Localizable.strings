@@ -21,7 +21,7 @@
 "Edit curve" = "Modifica curva";
 
 /* Ventole */
-"Back to Auto if the CPU reaches 95 °C or the RTX 87 °C. 30 % is about 3700 RPM." = "Torna ad Auto se la CPU arriva a 95 °C o la RTX a 87 °C. 30 % sono circa 3700 giri.";
+"Back to Auto if the CPU reaches 95 °C or the RTX 87 °C. 20 % is about 3300 RPM, Auto at idle 2200." = "Torna ad Auto se la CPU arriva a 95 °C o la RTX a 87 °C. 20 % sono circa 3300 giri, Auto a riposo 2200.";
 "both %@" = "entrambe su %@";
 "CPU %@, GPU %@" = "CPU %@, GPU %@";
 "not readable" = "non leggibile";
@@ -66,7 +66,7 @@
 "Power" = "Potenza";
 "On battery: %.1f W" = "A batteria: %.1f W";
 "Whole-machine draw from the battery" = "Consumo di tutto il PC dalla batteria";
-"    Peak : %.0f W" = "    Picco : %.0f W";
+"Peak : %.0f W" = "Picco : %.0f W";
 "CPU power = Intel package (cores + iGPU + system agent), from powermetrics" = "Potenza CPU = package Intel (core + iGPU + system agent), da powermetrics";
 "Load from the IORegistry (NVAccel). Temperature, power and clock from RM's shared data page, every 5 s with this window open, every minute otherwise." = "Carico dall'IORegistry (NVAccel). Temperatura, potenza e frequenza dalla pagina condivisa di RM, ogni 5 s con questa finestra aperta, altrimenti ogni minuto.";
 "No RTX numbers now: %@." = "Nessun dato RTX ora: %@.";

@@ -268,7 +268,9 @@ final class Daemon {
         guard let dump = try? ec.dump() else { return }
         let cpuTemp = Int(dump[Reg.cpuTemp])
         guard cpuTemp > 0 else { return }
-        let gpuTemp = smc?.temperature("TG0D") ?? cpuTemp   // no RTX reading: as hot as the CPU, on the safe side
+        // SMCNvidiaGPU binds to one NVRM build: after a driver update, until it is rebuilt too, the key does not answer. Then RM's page; with
+        // no RTX reading at all, as hot as the CPU, on the safe side.
+        let gpuTemp = smc?.temperature("TG0D") ?? readRTXTelemetry().tempC ?? cpuTemp
         let curve = config.fan.curve
         func wanted(_ temp: Int, _ now: Int?) -> Int? {
             let rising = curvePercent(curve, temp: temp)

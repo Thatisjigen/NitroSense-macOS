@@ -15,6 +15,9 @@ enum Overlay { case none, curve }
 let powerModeHelp = "Goes through the firmware's own mode route, TUGM and then _Q30, and is read back from EC FANT. Quiet can stop the fans when idle."
 let fanFirmwareHelp = "Goes through the firmware's gaming WMI and is read back. On this board Max speeds the fans up."
 
+// The Iris Xe idles at 0.02 W: two decimals under one watt, or it would read as nothing.
+func wattsText(_ watts: Double) -> String { String(format: watts < 1 ? "%.2f W" : "%.1f W", watts) }
+
 func fanSummaryText(_ firmware: FirmwareReading) -> String {
     func name(_ v: Int?) -> String { v.map { L(fanBehaviorName($0)) } ?? L("not readable") }
     return firmware.fanCPU == firmware.fanGPU ? L("both %@", name(firmware.fanCPU)) : L("CPU %@, GPU %@", name(firmware.fanCPU), name(firmware.fanGPU))
@@ -169,7 +172,7 @@ struct FanDutySliders: View {
         VStack(alignment: .leading, spacing: 8) {
             row("CPU", $cpu)
             row("GPU", $gpu)
-            Text("Back to Auto if the CPU reaches 95 °C or the RTX 87 °C. 30 % is about 3700 RPM.")
+            Text("Back to Auto if the CPU reaches 95 °C or the RTX 87 °C. 20 % is about 3300 RPM, Auto at idle 2200.")
                 .font(.system(size: 10)).foregroundStyle(NS.dim)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -399,7 +402,7 @@ struct MonitorRow: View {
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .trailing, spacing: 2) {
-                Text(rangeText).font(.system(size: 10)).foregroundStyle(NS.dim).monospacedDigit()
+                Text(rangeText.isEmpty ? " " : rangeText).font(.system(size: 10)).foregroundStyle(NS.dim).monospacedDigit()
                 ZStack(alignment: .topLeading) {
                     HistoryGraph(temps: temps, loads: loads, powers: powers, times: times, powerScaleMin: powerScale)
                     Text(name).font(.system(size: 11, weight: .medium)).foregroundStyle(NS.text).padding(6)
@@ -409,9 +412,12 @@ struct MonitorRow: View {
                 if let temp {
                     Text("\(temp)°").font(.system(size: 22, weight: .light)).foregroundStyle(NS.red).monospacedDigit()
                 }
-                Text(load.map { "\($0) %" } ?? "-- %").font(.system(size: 15, weight: .light)).foregroundStyle(NS.orange).monospacedDigit()
-                if !powers.isEmpty || power != nil {
-                    Text(power.map { String(format: "%.1f W", $0) } ?? "-- W")
+                // A figure that has never arrived takes no place; one that stopped arriving shows as --.
+                if load != nil || loads.contains(where: { $0 >= 0 }) {
+                    Text(load.map { "\($0) %" } ?? "-- %").font(.system(size: 15, weight: .light)).foregroundStyle(NS.orange).monospacedDigit()
+                }
+                if power != nil || powers.contains(where: { $0 >= 0 }) {
+                    Text(power.map(wattsText) ?? "-- W")
                         .font(.system(size: 15, weight: .light)).foregroundStyle(NS.yellow).monospacedDigit()
                 }
                 if let detail {
@@ -424,9 +430,10 @@ struct MonitorRow: View {
 
     private var rangeText: String {
         let validTemps = temps.filter { $0 >= 0 }
-        var t = "Min : \(validTemps.min().map { "\($0)°" } ?? "--")    Max : \(validTemps.max().map { "\($0)°" } ?? "--")"
-        if let maxW = powers.filter({ $0 >= 0 }).max() { t += L("    Peak : %.0f W", maxW) }
-        return t
+        var parts: [String] = []
+        if let low = validTemps.min(), let high = validTemps.max() { parts.append("Min : \(low)°    Max : \(high)°") }
+        if let maxW = powers.filter({ $0 >= 0 }).max() { parts.append(L("Peak : %.0f W", maxW)) }
+        return parts.joined(separator: "    ")
     }
 }
 
@@ -542,7 +549,7 @@ struct HistoryGraph: View {
             }
             if i < temps.count, temps[i] >= 0 { tipRow(L("Temp"), "\(temps[i]) °C", NS.red) }
             if i < loads.count, loads[i] >= 0 { tipRow(L("Load"), "\(loads[i]) %", NS.orange) }
-            if i < powers.count { tipRow(L("Power"), powers[i] >= 0 ? String(format: "%.1f W", powers[i]) : "--", NS.yellow) }
+            if i < powers.count, powers[i] >= 0 { tipRow(L("Power"), wattsText(powers[i]), NS.yellow) }
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 2)
