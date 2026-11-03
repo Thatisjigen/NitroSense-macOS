@@ -13,7 +13,8 @@ func tempColor(_ t: Int) -> Color {
 
 enum Overlay { case none, keyboard, curve }
 
-let unverifiedFirmwareHelp = "Goes through the firmware's gaming WMI. It has never been tried on this board: the firmware answers with a status and the state is read back, but what it really does has to be checked."
+let unverifiedFirmwareHelp = "Goes through the firmware's own mode route, TUGM and then _Q30, as on Linux for this model. It has not been tried on this board yet: the state is read back from EC FANT, and a mismatch shows as a warning."
+let fanFirmwareHelp = "Goes through the firmware's gaming WMI and is read back. On this board Max speeds the fans up."
 
 // MARK: - Main window
 
@@ -157,7 +158,7 @@ struct FanControlPanel: View {
                         NSListItem(label: item.label, icon: item.icon, selected: model.currentFan == item.mode, enabled: control.canSetFan) {
                             model.setFan(item.mode)
                         }
-                        .help(control.fanBlockedReason ?? unverifiedFirmwareHelp)
+                        .help(control.fanBlockedReason ?? fanFirmwareHelp)
                     }
                 }
                 .frame(width: 170)
@@ -175,7 +176,6 @@ struct FanControlPanel: View {
         } accessory: {
             HStack(spacing: 8) {
                 Text(statusLine).font(.system(size: 11)).foregroundStyle(NS.dim).monospacedDigit()
-                UnverifiedTag(help: unverifiedFirmwareHelp)
                 NSButton(label: "Read firmware", icon: "arrow.clockwise", enabled: control.canRead) { model.readFirmware() }
                     .help(control.readBlockedReason ?? "Asks the firmware for the fan, mode, keyboard and charge limit state through nitrod. Each call is one SMI, so it never runs by itself until the first read has answered.")
             }

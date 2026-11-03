@@ -25,6 +25,10 @@
  * NitroEC.kext, which has an exact whitelist, and only root reaches it. The NitroSense key mapping of the AN515-57 is
  * not included: its scancode is unverified here.
  *
+ * SMOD: the power mode through the firmware's own route (DSDT: _Q30 switches on TUGM), because this firmware answers status 1
+ * to SetGamingMiscSetting and GetGamingMiscSetting 0x0B. The one write here to a byte the EC shares. The route is nghiant03's
+ * for Linuwu-Sense on the same model (0xFE708607 + _Q30): https://github.com/0x7375646F/Linuwu-Sense/pull/147
+ *
  * RMOD is a plain read of the firmware fields behind the power modes (the regions ERM4, ERM6 and EMBX of the DSDT, used
  * by its _Q30): no SMI, no write. It tells what each mode is set to do on this board without needing Windows.
  */
@@ -32,6 +36,7 @@ DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
 {
     External (_SB_.PC00.WMID.WMBE, MethodObj)    // 3 Arguments
     External (_SB_.PC00.WMID.WMBH, MethodObj)    // 3 Arguments
+    External (_SB_.PC00.LPCB.EC0._Q30, MethodObj)    // 0 Arguments
 
     Scope (\_SB)
     {
@@ -63,7 +68,7 @@ DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
                 BUF0,   2048
             }
 
-            // Firmware fields behind the power modes, same addresses as the DSDT, read only:
+            // Firmware fields behind the power modes, same addresses as the DSDT; only SMOD writes, TUGM and IDPF:
             // ERM4 + 0xA0: M1N1 M1M1 M1T1 M1P2 M1DB M1CT M1CP, one spare byte, then M2.., M3.., M4.., M5DB M5CT M5CP
             OperationRegion (ERT4, SystemMemory, 0xFE7084A0, 0x28)
             Field (ERT4, ByteAcc, Lock, Preserve)
@@ -115,6 +120,30 @@ DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
                 RHDR [One] = BCOL /* \_SB_.NTRO.BCOL */
                 RHDR [0x02] = BIDP /* \_SB_.NTRO.BIDP */
                 Return (Concatenate (RHDR, BUF4))
+            }
+
+            // Power mode: Arg0 is the index _Q30 switches on, 1 performance, 2 balance, 3 quiet. _Q30 sets CCOL, PL1 and PL2 in the
+            // CPU, FANT, tells the EC and runs HIDB. IDPF picks its PL1 column: it reads 0 without Intel's DTT, which would give
+            // 30, 25 and 15 W, under what the board runs after POST; for this call it asks for the other one, 50, 45 and 35 W.
+            Method (SMOD, 1, Serialized)
+            {
+                If (_OSI ("Darwin"))
+                {
+                    If (CondRefOf (\_SB.PC00.LPCB.EC0._Q30))
+                    {
+                        If (((Arg0 >= One) && (Arg0 <= 0x03)))
+                        {
+                            Local0 = BIDP /* \_SB_.NTRO.BIDP */
+                            BIDP = 0x55
+                            BTUG = Arg0
+                            \_SB.PC00.LPCB.EC0._Q30 ()
+                            BIDP = Local0
+                            Return (Zero)
+                        }
+                    }
+                }
+
+                Return (One)
             }
 
             // Gaming WMI the way NitroSense does it:

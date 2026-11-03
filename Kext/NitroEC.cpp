@@ -115,6 +115,7 @@ bool NitroEC::start(IOService *provider) {
     hasWMEX = acpi->validateObject("WMEX") == kIOReturnSuccess;
     hasWMBX = acpi->validateObject("WMBX") == kIOReturnSuccess;
     hasRMOD = acpi->validateObject("RMOD") == kIOReturnSuccess;
+    hasSMOD = acpi->validateObject("SMOD") == kIOReturnSuccess;
 
     uint8_t cpuTemp = 0;
     if (readByte(0x58, &cpuTemp) == kIOReturnSuccess)   // CTMP on the ANV15-52
@@ -125,6 +126,7 @@ bool NitroEC::start(IOService *provider) {
     setProperty("NitroEC Battery WMI", hasWMEX);
     setProperty("NitroEC Gaming WMI", hasWMBX);
     setProperty("NitroEC Mode State", hasRMOD);
+    setProperty("NitroEC Power Mode", hasSMOD);
     registerService();
     return true;
 }
@@ -207,6 +209,32 @@ IOReturn NitroEC::modeState(uint8_t *buffer, uint32_t length) {
     if (!hasRMOD)
         return kIOReturnUnsupported;
     return readBuffer("RMOD", buffer, kNitroECModeStateSize);
+}
+
+// Performance, Balance and Quiet only, as _Q30 numbers them; Turbo (0) and Eco (4) stay out.
+IOReturn NitroEC::setMode(uint32_t index) {
+    if (index < 1 || index > 3) {
+        LOG("refused power mode %u (not whitelisted)", index);
+        return kIOReturnNotPermitted;
+    }
+    if (!hasSMOD)
+        return kIOReturnUnsupported;
+
+    OSNumber *arg = OSNumber::withNumber(index, 32);
+    if (!arg)
+        return kIOReturnNoMemory;
+
+    OSObject *params[] = {arg};
+    UInt32 result = 1;
+    IOLockLock(lock);
+    IOReturn ret = acpi->evaluateInteger("SMOD", &result, params, 1);
+    IOLockUnlock(lock);
+    arg->release();
+
+    LOG("power mode %u: SMOD -> 0x%x, result %u", index, ret, result);
+    if (ret != kIOReturnSuccess)
+        return ret;
+    return result == 0 ? kIOReturnSuccess : kIOReturnError;
 }
 
 IOReturn NitroEC::writeByte(uint32_t offset, uint32_t value) {
@@ -295,6 +323,7 @@ const IOExternalMethodDispatch NitroECUserClient::methods[kNitroECSelCount] = {
     [kNitroECSelWMBH]      = {&NitroECUserClient::sWMBH, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
     [kNitroECSelWMBE]      = {&NitroECUserClient::sWMBE, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
     [kNitroECSelModeState] = {&NitroECUserClient::sModeState, 0, 0, 0, kNitroECModeStateSize},
+    [kNitroECSelSetMode]   = {&NitroECUserClient::sSetMode, 1, 0, 0, 0},
 };
 
 bool NitroECUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type) {
@@ -346,6 +375,15 @@ IOReturn NitroECUserClient::sModeState(OSObject *target, void *, IOExternalMetho
     if (args->structureOutputSize < kNitroECModeStateSize)
         return kIOReturnBadArgument;
     return self->owner->modeState(static_cast<uint8_t *>(args->structureOutput), kNitroECModeStateSize);
+}
+
+IOReturn NitroECUserClient::sSetMode(OSObject *target, void *, IOExternalMethodArguments *args) {
+    auto self = static_cast<NitroECUserClient *>(target);
+    if (!self->isAdmin)
+        return kIOReturnNotPrivileged;
+    if (args->scalarInput[0] > 0xFF)
+        return kIOReturnBadArgument;
+    return self->owner->setMode(static_cast<uint32_t>(args->scalarInput[0]));
 }
 
 IOReturn NitroECUserClient::sWriteByte(OSObject *target, void *, IOExternalMethodArguments *args) {

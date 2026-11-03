@@ -17,6 +17,7 @@ class NitroEC : public IOService {
     bool hasWMEX {false};   // the loaded SSDT-NITRO exports WMEX (the read-only SSDT of branch anv15-52 does not)
     bool hasWMBX {false};   // ... WMBX (the SSDT of branch anv15-52-battery does not either)
     bool hasRMOD {false};   // ... RMOD (same)
+    bool hasSMOD {false};   // ... SMOD (same)
     bool fanLeftOffAuto {false};  // a call through this kext took the fans off Auto and none brought them back yet
 
 public:
@@ -27,6 +28,7 @@ public:
     IOReturn readByte(uint32_t offset, uint8_t *value);
     IOReturn dump(uint8_t *buffer, uint32_t length);
     IOReturn modeState(uint8_t *buffer, uint32_t length);
+    IOReturn setMode(uint32_t index);
     IOReturn writeByte(uint32_t offset, uint32_t value);
     IOReturn callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength);
     IOReturn callWMBE(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength);
@@ -50,6 +52,7 @@ class NitroECUserClient : public IOUserClient {
     static IOReturn sReadByte(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sDump(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sModeState(OSObject *target, void *ref, IOExternalMethodArguments *args);
+    static IOReturn sSetMode(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWriteByte(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWMBH(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWMBE(OSObject *target, void *ref, IOExternalMethodArguments *args);

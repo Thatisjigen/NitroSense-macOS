@@ -167,8 +167,9 @@ final class Daemon {
         }
         if let wanted = powerModes[config.userMode] {
             do {
-                let now = try readMiscSetting(ec, GamingWMI.miscPlatformProfile)
-                if now != wanted {
+                let now = try currentProfile(ec)
+                // A wake can reset PL1 and PL2 in the CPU without FANT showing it.
+                if now != wanted || reason == "wake" {
                     log("apply (\(reason)): power mode \(profileName(now)) -> \(profileName(wanted))")
                     try setPlatformProfile(ec, wanted)
                 }
@@ -265,7 +266,9 @@ final class Daemon {
             guard let mode = request["mode"] as? String, let value = powerModes[mode] else {
                 return ["ok": false, "error": "power mode must be quiet, balance or performance"]
             }
-            guard gamingWMI else { return noGamingWMI() }
+            guard nitroECOffers("NitroEC Power Mode") else {
+                return ["ok": false, "error": "the loaded NitroEC.kext and SSDT-NITRO offer no power mode route: they need the build of this branch and a reboot"]
+            }
             guard answered({ $0.profile != nil }) else { return notRead("power mode") }
             guard commandAllowedNow() else { return tooSoon() }
             do {

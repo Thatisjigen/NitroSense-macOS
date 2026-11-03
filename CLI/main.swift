@@ -21,15 +21,9 @@ func fail(_ message: String) -> Never {
 
 // Prints what the firmware and the EC say about the power mode, without stopping on what cannot be read.
 func printPowerMode(_ ec: NitroEC, _ label: String) {
-    let firmware: String
-    do {
-        firmware = profileName(try readMiscSetting(ec, GamingWMI.miscPlatformProfile))
-    } catch {
-        firmware = "not readable (\(error))"
-    }
     let fant = ((try? ec.dump())?[Reg.fanTable] ?? 0xFF) & 0x0F
-    var line = "\(label) firmware \(firmware)   EC FANT \(fant): \(profileNameFromFANT(fant))"
-    if let state = try? ec.modeState() { line += "   TUGM \(state[0])   CCOL \(state[1])" }
+    var line = "\(label) EC FANT \(fant): \(profileNameFromFANT(fant))"
+    if let state = try? ec.modeState() { line += "   TUGM \(state[0])   CCOL \(state[1])   IDPF \(hex(state[2]))" }
     print(line)
 }
 
@@ -161,10 +155,8 @@ do {
         if args[1] == "status" {
             printPowerMode(ec, "Power mode")
         } else if let value = powerModes[args[1]] {
-            // No read first: on the ANV15-52 GetGamingMiscSetting answers status 1, which says nothing about the SET (WMBH runs
-            // EC0.HIDB after its SMI, and older Linux read this from EC 0x54 and wrote it through this method). FANT tells.
             printPowerMode(ec, "Before")
-            let failure = attempt("SetGamingMiscSetting 0x0B \(hex(value)) (\(profileName(value)))") { try setPlatformProfile(ec, value) }
+            let failure = attempt("Power mode \(profileName(value)) through TUGM and _Q30") { try setPlatformProfile(ec, value) }
             Thread.sleep(forTimeInterval: 0.5)
             printPowerMode(ec, "After ")
             if failure { exit(1) }

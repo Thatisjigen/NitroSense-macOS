@@ -98,6 +98,22 @@ final class NitroEC {
         return buffer
     }
 
+    // The index _Q30 of the DSDT switches on, through SMOD in SSDT-NITRO. Root only; the kext takes 1, 2 and 3.
+    func setMode(_ index: UInt8) throws {
+        var scalar = UInt64(index)
+        let kr = IOConnectCallScalarMethod(connection, UInt32(kNitroECSelSetMode.rawValue), &scalar, 1, nil, nil)
+        switch kr {
+        case KERN_SUCCESS:
+            return
+        case kIOReturnNotPrivileged:
+            throw NitroECError(description: "the power mode needs root: run with sudo")
+        case kIOReturnUnsupported:
+            throw NitroECError(description: "the loaded NitroEC.kext or SSDT-NITRO has no power mode route: they need the build of this branch and a reboot")
+        default:
+            throw NitroECError(description: "power mode \(index) failed: 0x\(String(UInt32(bitPattern: kr), radix: 16))")
+        }
+    }
+
     // TUGM, CCOL, IDPF, 0, then the M1..M5 tables. A plain read, no SMI, no root.
     func modeState() throws -> [UInt8] {
         var buffer = [UInt8](repeating: 0, count: Int(kNitroECModeStateSize))
@@ -162,7 +178,7 @@ func printStatus(_ ec: [UInt8]) {
     Power          AC \(ec[Reg.acStatus] & 0x01 == 1 ? "plugged" : "unplugged")   PL1 \(Double(be16(ec, Reg.pl1)) / 10) W   PL2 \(Double(be16(ec, Reg.pl2)) / 10) W
     Lid            \(ec[Reg.lid] & 0x40 != 0 ? "closed" : "open")
     Keyboard       backlight bit KBBL \(ec[Reg.kbBacklight] & 0x01) (EC 0x48 bit 0, unverified; the Fn keys drive the backlight)
-    Power mode     FANT 0x54 = \(fant): \(profileNameFromFANT(fant)) (table of _Q30 in the DSDT, unverified; 'sudo nitroctl mode status' asks the firmware)
+    Power mode     FANT 0x54 = \(fant): \(profileNameFromFANT(fant)) (table of _Q30 in the DSDT)
     """)
 }
 
@@ -302,13 +318,23 @@ func profileNameFromFANT(_ fant: UInt8) -> String {
     profileValueFromFANT(fant).map(profileName) ?? "?"
 }
 
-// Reply: status in bits 7:0, value in bits 15:8 (Linux acer-wmi, WMID_gaming_get_misc_setting).
-func readMiscSetting(_ ec: NitroEC, _ index: UInt8) throws -> UInt8 {
-    try checkedFirmware(try ec.wmbh(GamingWMI.getMisc, [index]), "GetGamingMiscSetting \(hex(index))", minBytes: 2)[1]
+// This firmware answers status 1 to SetGamingMiscSetting and GetGamingMiscSetting 0x0B (on BIOS 1.53 too,
+// Linuwu-Sense #131). The mode goes through its own route, TUGM and _Q30, and FANT, which _Q30 sets, says whether it happened.
+func currentProfile(_ ec: NitroEC) throws -> UInt8 {
+    let fant = try ec.dump()[Reg.fanTable] & 0x0F
+    guard let value = profileValueFromFANT(fant) else { throw NitroECError(description: "EC FANT is \(fant): not a mode") }
+    return value
 }
 
 func setPlatformProfile(_ ec: NitroEC, _ value: UInt8) throws {
-    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setMisc, [GamingWMI.miscPlatformProfile, value]), "SetGamingMiscSetting")
+    guard let index = (UInt8(0)...4).first(where: { profileValueFromFANT($0) == value }) else {
+        throw NitroECError(description: "\(hex(value)) is not a power mode")
+    }
+    try ec.setMode(index)
+    let now = try currentProfile(ec)
+    guard now == value else {
+        throw NitroECError(description: "asked for \(profileName(value)), EC FANT says \(profileName(now))")
+    }
 }
 
 // MARK: - Battery charge limit (firmware battery-health WMI, layout from Linuwu-Sense)
@@ -365,9 +391,14 @@ struct FirmwareReading: Codable, Equatable {
         }
         if let r = ask("0F 01 fan CPU", minBytes: 2, { try ec.wmbh(GamingWMI.getFanBehavior, [GamingWMI.fanCPU]) }) { fanCPU = Int(r[1] & 0x03) }
         if let r = ask("0F 08 fan GPU", minBytes: 2, { try ec.wmbh(GamingWMI.getFanBehavior, [GamingWMI.fanGPU]) }) { fanGPU = Int(r[1] >> 6) }
-        if let r = ask("17 0B profile", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscPlatformProfile]) }) { profile = Int(r[1]) }
-        if let r = ask("17 0A supported", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscSupportedProfiles]) }) { supportedProfiles = Int(r[1]) }
-        if let r = ask("15 01 keyboard", minBytes: 1, { try ec.wmbh(GamingWMI.getKBBacklight, [1]) }) { keyboard = r.map(Int.init) }
+        if nitroECOffers("NitroEC Power Mode") {
+            // No GET: 0x17 and 0x15 answer status 1 on this firmware, and that is no error to show. The mode is read from FANT.
+            profile = (try? currentProfile(ec)).map(Int.init)
+        } else {
+            if let r = ask("17 0B profile", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscPlatformProfile]) }) { profile = Int(r[1]) }
+            if let r = ask("17 0A supported", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscSupportedProfiles]) }) { supportedProfiles = Int(r[1]) }
+            if let r = ask("15 01 keyboard", minBytes: 1, { try ec.wmbh(GamingWMI.getKBBacklight, [1]) }) { keyboard = r.map(Int.init) }
+        }
         self.raw = raw
         self.errors = errors
     }
@@ -381,7 +412,7 @@ struct FirmwareReading: Codable, Equatable {
 func printFirmware(_ reading: FirmwareReading) {
     func text(_ v: Int?, _ name: (Int) -> String) -> String { v.map(name) ?? "not readable" }
     print("Fan behaviour  CPU \(text(reading.fanCPU, fanBehaviorName))   GPU \(text(reading.fanGPU, fanBehaviorName))")
-    print("Power mode     \(text(reading.profile) { profileName(UInt8(truncatingIfNeeded: $0)) })   (misc setting 0x0B)")
+    print("Power mode     \(text(reading.profile) { profileName(UInt8(truncatingIfNeeded: $0)) })   (EC FANT)")
     print("Supported      \(text(reading.supportedProfiles) { String(format: "0x%02X", $0) })   (misc setting 0x0A, bit n = value n; Linux calls it unreliable on some models)")
     if let k = reading.keyboard, k.count >= 9 {
         print("Keyboard       status \(k[0])  mode \(k[1])  speed \(k[2])  brightness \(k[3])  direction \(k[5])  colour \(k[6]) \(k[7]) \(k[8])   (layout from Linuwu-Sense, RGB models)")
@@ -401,7 +432,7 @@ func printFirmware(_ reading: FirmwareReading) {
 // and DB CT CP of M5 at +0x24. _Q30 of the DSDT takes PL1 from M?M1 if IDPF is 0x55, otherwise from M?N1, and PL2 from M?P2.
 func printModeState(_ state: [UInt8]) {
     print("Firmware fields, plain read (no SMI): TUGM \(state[0])   CCOL \(state[1])   IDPF \(hex(state[2]))")
-    print("PL1 = \(state[2] == 0x55 ? "M1" : "N1") column, PL2 = P2 column (_Q30 multiplies them by 8 for the 1/8 W registers, so they should read as watts).")
+    print("PL2 = P2 column. PL1 = M1 column through SMOD, which sets IDPF to 0x55 for its call; N1 if _Q30 runs by itself with IDPF \(hex(state[2])). _Q30 multiplies them by 8 for the 1/8 W registers of the CPU, so they read as watts.")
     print("    N1   M1   T1   P2   DB   CT   CP")
     let rows = [("M1: CCOL 0 and 6, quiet and eco", 0), ("M2: CCOL 1, balance", 8), ("M3: CCOL 4, performance", 16), ("M4: CCOL 5, turbo", 24)]
     for (name, base) in rows {
