@@ -92,6 +92,11 @@ final class PowerMeter {
         }
     }
 
+    // The termination handler starts it again.
+    func restart() {
+        process?.terminate()
+    }
+
     func stop() {
         stopped = true
         process?.terminate()
@@ -111,6 +116,7 @@ final class Daemon {
     var lastBatteryRead = Date.distantPast
     var cpuPower: Double?
     var cpuPowerAt = Date.distantPast
+    var igpuChecks = 0
     var igpuActive: Double?
     var igpuActiveAt = Date.distantPast
     lazy var powerMeter = PowerMeter(onSample: { [weak self] watts in
@@ -224,9 +230,22 @@ final class Daemon {
     func startFanWatch() {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 5, repeating: 5)
-        timer.setEventHandler { [weak self] in self?.checkFanLimits() }
+        timer.setEventHandler { [weak self] in
+            self?.checkFanLimits()
+            self?.checkIGPUReading()
+        }
         timer.resume()
         fanWatch = timer
+    }
+
+    // powermetrics started at boot, before the Iris Xe driver is up, leaves its GPU lines out for as long as it runs. Every 30 s,
+    // for five minutes at most, start it again until one arrives.
+    private func checkIGPUReading() {
+        guard igpuActive == nil, igpuChecks < 60 else { return }
+        igpuChecks += 1
+        guard igpuChecks % 6 == 0 else { return }
+        log("powermetrics: no GPU Active line yet, starting it again")
+        powerMeter.restart()
     }
 
     private func checkFanLimits() {
