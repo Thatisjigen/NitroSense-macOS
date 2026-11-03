@@ -191,8 +191,6 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
         ("monitoring-hover", AnyView(MonitoringPanel().frame(width: 680, height: 300)), busy),
         ("main", AnyView(MainView()), model),
         ("main-ready", AnyView(MainView()), ready),
-        ("keyboard", AnyView(KeyboardPanel {}), model),
-        ("keyboard-ready", AnyView(KeyboardPanel {}), ready),
         ("settings", AnyView(SettingsMenu().background(Color(white: 0.16))), model),
         ("settings-ready", AnyView(SettingsMenu().background(Color(white: 0.16))), ready),
         ("menu", AnyView(MenuContent()), model),

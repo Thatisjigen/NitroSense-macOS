@@ -5,7 +5,10 @@
 //   {"cmd":"status"}                 -> config, live EC dump, mode fields, last firmware reading, CPU power. No firmware call.
 //   {"cmd":"firmware"}               -> runs the GET calls, once every few seconds at most
 //   {"cmd":"fan","mode":"auto|max"}  -> SetGamingFanBehavior, then read back; the choice is remembered
-//   {"cmd":"power","mode":"quiet|balance|performance"} -> SetGamingMiscSetting 0x0B, then read back; the choice is remembered
+//   {"cmd":"fan","mode":"custom","cpu":N,"gpu":N} -> manual duty, 30 to 100 %; remembered; back to Auto if it runs hot
+//   {"cmd":"usb","value":0|10|20|30} -> USB charging when powered off, read back
+//   {"cmd":"backlight","mode":"on|off"} -> keyboard backlight off after 30 s, read back
+//   {"cmd":"power","mode":"quiet|balance|performance"} -> TUGM and _Q30, then read back from FANT; the choice is remembered
 //     (both refused until the matching GET has answered: a write that cannot be read back proves nothing)
 //   {"cmd":"battery"}                -> reads the 80 % charge limit (WMBE 0x14), once every few seconds at most
 //   {"cmd":"battery","mode":"on|off"} -> sets it (WMBE 0x15) and reads it back; works with the battery-limit kext and SSDT too
@@ -13,8 +16,9 @@
 //
 // Nothing has been tested on this board, so nitrod never calls the firmware by itself until the user chose a setting with
 // this version: no write, and no read either, at start or at wake. After that it re-applies only that choice, at start
-// and after wake: it reads first and writes only if the firmware moved. There is no curve and no failsafe: in Auto the EC
-// keeps its own fan control, and Max can only cool more. When it stops, it brings the fans back to Auto if it took them off.
+// and after wake: it reads first and writes only if the firmware moved. There is no curve: in Auto the EC keeps its own fan
+// control, Max can only cool more, and with a manual duty nitrod goes back to Auto if the CPU or the RTX runs hot. When it
+// stops, it brings the fans back to Auto if it took them off.
 // No byte of the EC is written. The charge limit is never re-applied at all: the firmware keeps it across reboots, so it
 // changes only when the user asks for it, and what is reported comes from the firmware's reply, never from config.json.
 
@@ -91,6 +95,8 @@ final class Daemon {
     var lastFirmwareRead = Date.distantPast
     var lastFirmwareCommand = Date.distantPast
     var fanOffAuto = false              // the fans are off Auto because of this daemon
+    var hotTicks = 0                    // manual duty: consecutive samples over the limits
+    var fanWatch: DispatchSourceTimer?
     var batteryLimit: BatteryLimitReading?
     var lastBatteryRead = Date.distantPast
     var cpuPower: Double?
@@ -178,12 +184,16 @@ final class Daemon {
             }
         }
         if !config.userFan.isEmpty {
-            let wanted = config.userFan == "max" ? 2 : 1
+            let wanted = config.userFan == "custom" ? 3 : config.userFan == "max" ? 2 : 1
             do {
                 let cpu = try readFanBehavior(ec, gpu: false), gpu = try readFanBehavior(ec, gpu: true)
                 // 0 is the firmware's own default before anyone set it: that is Auto too, for a choice of Auto.
                 let alreadyThere = wanted == 1 ? cpu <= 1 && gpu <= 1 : cpu == wanted && gpu == wanted
-                if !alreadyThere {
+                if wanted == 3 {
+                    // The firmware does not report the duty: it is sent again every time, and a wake may have reset it.
+                    log("apply (\(reason)): fans at CPU \(config.userFanCPU) %, GPU \(config.userFanGPU) %")
+                    try setFanCustom(ec, cpu: config.userFanCPU, gpu: config.userFanGPU)
+                } else if !alreadyThere {
                     log("apply (\(reason)): fans CPU \(fanBehaviorName(cpu)), GPU \(fanBehaviorName(gpu)) -> \(fanBehaviorName(wanted))")
                     try setFanBehavior(ec, max: wanted != 1)
                 }
@@ -193,6 +203,34 @@ final class Daemon {
             }
         }
         readFirmware()
+    }
+
+    // With a manual duty the EC no longer decides the fans. Over these limits for three samples in a row they go back to Auto.
+    func startFanWatch() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.setEventHandler { [weak self] in self?.checkFanLimits() }
+        timer.resume()
+        fanWatch = timer
+    }
+
+    private func checkFanLimits() {
+        guard config.userFan == "custom", fanOffAuto else { hotTicks = 0; return }
+        let cpu = (try? ec.dump())?[Reg.cpuTemp] ?? 0
+        let rtx = readRTXTelemetry().tempC ?? 0
+        hotTicks = cpu >= 95 || rtx >= 87 ? hotTicks + 1 : 0
+        guard hotTicks >= 3 else { return }
+        log("fan: CPU \(cpu) C, RTX \(rtx) C with a manual duty: back to Auto")
+        hotTicks = 0
+        do {
+            try setFanBehavior(ec, max: false)
+            fanOffAuto = false
+            config.userFan = "auto"
+            save()
+            readFirmware()
+        } catch {
+            log("fans back to Auto: \(error)")
+        }
     }
 
     func shutdown() {
@@ -239,28 +277,73 @@ final class Daemon {
             if Date().timeIntervalSince(lastFirmwareRead) >= minFirmwareReadInterval { readFirmware() }
             return statusReply()
         case "fan":
-            guard let mode = request["mode"] as? String, ["auto", "max"].contains(mode) else {
-                return ["ok": false, "error": "fan mode must be auto or max: manual duty and the curve are left out on the \(Reg.model)"]
+            guard let mode = request["mode"] as? String, ["auto", "max", "custom"].contains(mode) else {
+                return ["ok": false, "error": "fan mode must be auto, max or custom"]
             }
+            let cpuDuty = request["cpu"] as? Int ?? config.userFanCPU, gpuDuty = request["gpu"] as? Int ?? config.userFanGPU
             guard gamingWMI else { return noGamingWMI() }
             guard answered({ $0.fanCPU != nil && $0.fanGPU != nil }) else { return notRead("fan behaviour") }
             guard commandAllowedNow() else { return tooSoon() }
             do {
-                try setFanBehavior(ec, max: mode == "max")
-                fanOffAuto = mode == "max"
+                if mode == "custom" {
+                    try setFanCustom(ec, cpu: cpuDuty, gpu: gpuDuty)
+                    config.userFanCPU = cpuDuty
+                    config.userFanGPU = gpuDuty
+                } else {
+                    try setFanBehavior(ec, max: mode == "max")
+                }
+                fanOffAuto = mode != "auto"
+                hotTicks = 0
                 config.userFan = mode
                 save()
-                log("fan: \(mode), asked by a client")
+                log("fan: \(mode)\(mode == "custom" ? " CPU \(cpuDuty) %, GPU \(gpuDuty) %" : ""), asked by a client")
                 readFirmware()
                 var reply = statusReply()
-                let wanted = mode == "max" ? 2 : 1
+                let wanted = mode == "custom" ? 3 : mode == "max" ? 2 : 1
                 if firmware?.fanCPU != wanted || firmware?.fanGPU != wanted {
                     reply["warning"] = "the firmware accepted fan \(mode) but now reports \(firmware?.fanSummary ?? "nothing")"
                 }
                 return reply
             } catch {
                 log("fan \(mode): \(error)")
+                // A manual duty half sent must not stay: mode 3 may already be on.
+                if mode == "custom" {
+                    do { try setFanBehavior(ec, max: false); fanOffAuto = false } catch { log("fans back to Auto: \(error)") }
+                }
+                readFirmware()
                 return refused("fan \(mode): \(error)")
+            }
+        case "usb":
+            guard let value = request["value"] as? Int, GamingWMI.usbChargeSet[value] != nil else {
+                return ["ok": false, "error": "USB charging takes 0, 10, 20 or 30"]
+            }
+            guard commandAllowedNow() else { return tooSoon() }
+            do {
+                try setUSBCharge(ec, value)
+                log("USB charging: \(value), asked by a client")
+                readFirmware()
+                var reply = statusReply()
+                if firmware?.usbCharge != value { reply["warning"] = "the firmware accepted USB charging \(value) but now reports \(firmware?.usbCharge.map(String.init) ?? "nothing")" }
+                return reply
+            } catch {
+                log("USB charging \(value): \(error)")
+                return refused("USB charging: \(error)")
+            }
+        case "backlight":
+            guard let mode = request["mode"] as? String, ["on", "off"].contains(mode) else {
+                return ["ok": false, "error": "backlight takes on or off"]
+            }
+            guard commandAllowedNow() else { return tooSoon() }
+            do {
+                try setKBTimeout(ec, mode == "on")
+                log("backlight timeout: \(mode), asked by a client")
+                readFirmware()
+                var reply = statusReply()
+                if firmware?.kbTimeout != (mode == "on") { reply["warning"] = "the firmware accepted the backlight timeout but reads back differently" }
+                return reply
+            } catch {
+                log("backlight timeout \(mode): \(error)")
+                return refused("backlight timeout: \(error)")
             }
         case "power":
             guard let mode = request["mode"] as? String, let value = powerModes[mode] else {
@@ -460,6 +543,7 @@ while ec == nil {
 
 let daemon = Daemon(ec: ec!)
 daemon.applyAll(reason: "start")
+daemon.startFanWatch()
 daemon.powerMeter.start()
 let server = startServer(daemon)
 registerPower(daemon)

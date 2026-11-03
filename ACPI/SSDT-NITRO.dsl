@@ -25,6 +25,9 @@
  * NitroEC.kext, which has an exact whitelist, and only root reaches it. The NitroSense key mapping of the AN515-57 is
  * not included: its scancode is unverified here.
  *
+ * WMAX -> \_SB.PC00.WMID.WMAA: the Apge WMI (GUID 61EF69EA-865C-4BC3-A502-A0DEBA0CB531), which hands the buffer to the firmware
+ * SMI: USB charging when powered off and the keyboard backlight timeout, layouts from Linuwu-Sense. Only the kext's exact list passes.
+ *
  * SMOD: the power mode through the firmware's own route (DSDT: _Q30 switches on TUGM), because this firmware answers status 1
  * to SetGamingMiscSetting and GetGamingMiscSetting 0x0B. The one write here to a byte the EC shares. The route is nghiant03's
  * for Linuwu-Sense on the same model (0xFE708607 + _Q30): https://github.com/0x7375646F/Linuwu-Sense/pull/147
@@ -34,6 +37,7 @@
  */
 DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
 {
+    External (_SB_.PC00.WMID.WMAA, MethodObj)    // 3 Arguments
     External (_SB_.PC00.WMID.WMBE, MethodObj)    // 3 Arguments
     External (_SB_.PC00.WMID.WMBH, MethodObj)    // 3 Arguments
     External (_SB_.PC00.LPCB.EC0._Q30, MethodObj)    // 0 Arguments
@@ -155,6 +159,24 @@ DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
                     If (CondRefOf (\_SB.PC00.WMID.WMBH))
                     {
                         Return (\_SB.PC00.WMID.WMBH (Zero, Arg0, Arg1))
+                    }
+                }
+
+                Return (Buffer (0x04)
+                {
+                     0xFF, 0xFF, 0xFF, 0xFF
+                })
+            }
+
+            // Apge WMI the way NitroSense does it:
+            // WMAX (method, Buffer) -> WMAA (0, method, Buffer). Whitelisted by the kext; Darwin only.
+            Method (WMAX, 2, Serialized)
+            {
+                If (_OSI ("Darwin"))
+                {
+                    If (CondRefOf (\_SB.PC00.WMID.WMAA))
+                    {
+                        Return (\_SB.PC00.WMID.WMAA (Zero, Arg0, Arg1))
                     }
                 }
 

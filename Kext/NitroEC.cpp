@@ -33,14 +33,16 @@ enum : uint32_t {
 enum : uint32_t {
     kWMBHSetFanBehavior = 0x0E,  // SetGamingFanBehavior, uint64: bits 15:0 fan bitmap, 17:16 CPU mode, 23:22 GPU mode
     kWMBHGetFanBehavior = 0x0F,  // GetGamingFanBehavior, uint32 fan bitmap
+    kWMBHSetFanSpeed    = 0x10,  // SetGamingFanSpeed, uint64: byte 0 fan (1 CPU, 4 GPU), byte 1 percent
     kWMBHGetKBBacklight = 0x15,  // GetGamingKBBacklight, uint32 1. Read only: SetGamingKBBacklight (0x14) is not allowed.
     kWMBHSetMisc        = 0x16,  // SetGamingMiscSetting, uint64: byte 0 index, byte 1 value; the firmware then runs HIDB
     kWMBHGetMisc        = 0x17,  // GetGamingMiscSetting, uint32 index
 
     kFanCPU = 0x01, kFanGPU = 0x08, kFanBoth = kFanCPU | kFanGPU,
-    // Third byte of the uint64: both fans in Auto (mode 1, 0x410009) or in Max (mode 2, firmware "turbo", 0x820009).
-    // Custom (mode 3) and SetGamingFanSpeed (0x10) stay out: manual duty could park a fan.
-    kFanAutoByte = 0x41, kFanMaxByte = 0x82,
+    // Third byte of the uint64: both fans in Auto (mode 1, 0x410009), Max (mode 2, firmware "turbo", 0x820009) or Custom (mode 3,
+    // 0xC30009). A manual duty under kFanSpeedMin is refused, so that no call can park a fan.
+    kFanAutoByte = 0x41, kFanMaxByte = 0x82, kFanCustomByte = 0xC3,
+    kFanSpeedCPU = 1, kFanSpeedGPU = 4, kFanSpeedMin = 30,
 
     kMiscSupportedProfiles = 0x0A,  // read only
     kMiscPlatformProfile   = 0x0B,
@@ -60,7 +62,9 @@ bool NitroEC::isWriteAllowed(uint32_t, uint32_t) { return false; }
 bool NitroEC::isWMBHAllowed(uint32_t opcode, const uint8_t *in) {
     switch (opcode) {
     case kWMBHSetFanBehavior:
-        return in[0] == kFanBoth && in[1] == 0 && (in[2] == kFanAutoByte || in[2] == kFanMaxByte) && isZeroFrom(in, 3);
+        return in[0] == kFanBoth && in[1] == 0 && (in[2] == kFanAutoByte || in[2] == kFanMaxByte || in[2] == kFanCustomByte) && isZeroFrom(in, 3);
+    case kWMBHSetFanSpeed:
+        return (in[0] == kFanSpeedCPU || in[0] == kFanSpeedGPU) && in[1] >= kFanSpeedMin && in[1] <= 100 && isZeroFrom(in, 2);
     case kWMBHGetFanBehavior:
         return (in[0] == kFanCPU || in[0] == kFanGPU) && isZeroFrom(in, 1);
     case kWMBHGetKBBacklight:
@@ -81,6 +85,21 @@ bool NitroEC::isWMBEAllowed(uint32_t method, const uint8_t *in) {
         return in[0] == 1 && in[1] == kHealthMaskLimit && isZeroFrom(in, 2);
     case kWMBESetHealth:
         return in[0] == 1 && in[1] == kHealthMaskLimit && in[2] <= 1 && isZeroFrom(in, 3);
+    default:
+        return false;
+    }
+}
+
+// Apge WMI (\_SB.PC00.WMID.WMAA), forwarded to BIOS SMM. Method 1 sets, 2 reads. Layouts from Linuwu-Sense, whose USB charging and
+// backlight timeout calls these are; the replies say whether this firmware has them.
+bool NitroEC::isWMAAAllowed(uint32_t method, const uint8_t *in) {
+    switch (method) {
+    case 2:
+        return (in[0] == 0x04 && isZeroFrom(in, 1)) || (in[0] == 0x01 && in[1] == 0x84 && in[2] == 0x08 && isZeroFrom(in, 3));
+    case 1:
+        if (in[0] == 0x04 && isZeroFrom(in, 3))   // USB charging: off, or on down to 10, 20 or 30 % of battery
+            return (in[1] == 0x1F && in[2] == 0x0A) || (in[1] == 0x0F && (in[2] == 0x0A || in[2] == 0x14 || in[2] == 0x1E));
+        return in[0] == 0x02 && in[1] == 0x84 && in[2] == 0x08 && in[3] == 0 && in[4] == 0 && (in[5] == 0 || in[5] == 0x1E) && isZeroFrom(in, 6);
     default:
         return false;
     }
@@ -116,6 +135,7 @@ bool NitroEC::start(IOService *provider) {
     hasWMBX = acpi->validateObject("WMBX") == kIOReturnSuccess;
     hasRMOD = acpi->validateObject("RMOD") == kIOReturnSuccess;
     hasSMOD = acpi->validateObject("SMOD") == kIOReturnSuccess;
+    hasWMAX = acpi->validateObject("WMAX") == kIOReturnSuccess;
 
     uint8_t cpuTemp = 0;
     if (readByte(0x58, &cpuTemp) == kIOReturnSuccess)   // CTMP on the ANV15-52
@@ -127,6 +147,7 @@ bool NitroEC::start(IOService *provider) {
     setProperty("NitroEC Gaming WMI", hasWMBX);
     setProperty("NitroEC Mode State", hasRMOD);
     setProperty("NitroEC Power Mode", hasSMOD);
+    setProperty("NitroEC Apge WMI", hasWMAX);
     registerService();
     return true;
 }
@@ -256,12 +277,24 @@ IOReturn NitroEC::callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uin
         bool answered = ret == kIOReturnSuccess && *outLength > 0;
         bool accepted = answered && out[0] == 0;
         // Max accepted, or no answer at all, so that the state is unknown: stop() will ask for Auto. A refusal changed nothing.
-        if (in[2] == kFanMaxByte && (accepted || !answered))
+        if ((in[2] == kFanMaxByte || in[2] == kFanCustomByte) && (accepted || !answered))
             fanLeftOffAuto = true;
         if (in[2] == kFanAutoByte && accepted)
             fanLeftOffAuto = false;
     }
     return ret;
+}
+
+IOReturn NitroEC::callWMAA(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
+    if (!isWMAAAllowed(method, in)) {
+        LOG("refused WMAA 0x%02X [%02X %02X %02X] (not whitelisted)", method, in[0], in[1], in[2]);
+        return kIOReturnNotPermitted;
+    }
+    if (!hasWMAX) {
+        LOG("refused WMAA 0x%02X: the loaded SSDT-NITRO has no WMAX", method);
+        return kIOReturnUnsupported;
+    }
+    return callWMI("WMAX", method, in, out, outLength);
 }
 
 IOReturn NitroEC::callWMBE(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength) {
@@ -324,6 +357,7 @@ const IOExternalMethodDispatch NitroECUserClient::methods[kNitroECSelCount] = {
     [kNitroECSelWMBE]      = {&NitroECUserClient::sWMBE, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
     [kNitroECSelModeState] = {&NitroECUserClient::sModeState, 0, 0, 0, kNitroECModeStateSize},
     [kNitroECSelSetMode]   = {&NitroECUserClient::sSetMode, 1, 0, 0, 0},
+    [kNitroECSelWMAA]      = {&NitroECUserClient::sWMAA, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
 };
 
 bool NitroECUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type) {
@@ -408,14 +442,18 @@ IOReturn NitroECUserClient::sWriteByte(OSObject *target, void *, IOExternalMetho
 }
 
 IOReturn NitroECUserClient::sWMBH(OSObject *target, void *, IOExternalMethodArguments *args) {
-    return sWMI(target, args, false);
+    return sWMI(target, args, 0);
 }
 
 IOReturn NitroECUserClient::sWMBE(OSObject *target, void *, IOExternalMethodArguments *args) {
-    return sWMI(target, args, true);
+    return sWMI(target, args, 1);
 }
 
-IOReturn NitroECUserClient::sWMI(OSObject *target, IOExternalMethodArguments *args, bool battery) {
+IOReturn NitroECUserClient::sWMAA(OSObject *target, void *, IOExternalMethodArguments *args) {
+    return sWMI(target, args, 2);
+}
+
+IOReturn NitroECUserClient::sWMI(OSObject *target, IOExternalMethodArguments *args, int bank) {
     auto self = static_cast<NitroECUserClient *>(target);
     if (!self->isAdmin)
         return kIOReturnNotPrivileged;
@@ -426,8 +464,9 @@ IOReturn NitroECUserClient::sWMI(OSObject *target, IOExternalMethodArguments *ar
     auto in = static_cast<const uint8_t *>(args->structureInput);
     auto out = static_cast<uint8_t *>(args->structureOutput);
     uint32_t outLength = min(args->structureOutputSize, (uint32_t)kNitroECWMBHOutSize);
-    IOReturn ret = battery ? self->owner->callWMBE(opcode, in, out, &outLength)
-                           : self->owner->callWMBH(opcode, in, out, &outLength);
+    IOReturn ret = bank == 2 ? self->owner->callWMAA(opcode, in, out, &outLength)
+                 : bank == 1 ? self->owner->callWMBE(opcode, in, out, &outLength)
+                             : self->owner->callWMBH(opcode, in, out, &outLength);
     if (ret == kIOReturnSuccess)
         args->structureOutputSize = outLength;
     return ret;

@@ -59,6 +59,10 @@ final class NitroEC {
         try wmi(kNitroECSelWMBH, "WMBH", opcode, bytes)
     }
 
+    func wmaa(_ method: UInt8, _ bytes: [UInt8]) throws -> [UInt8] {
+        try wmi(kNitroECSelWMAA, "WMAA", method, bytes)
+    }
+
     func wmbe(_ method: UInt8, _ bytes: [UInt8]) throws -> [UInt8] {
         try wmi(kNitroECSelWMBE, "WMBE", method, bytes)
     }
@@ -204,12 +208,21 @@ func parseOffset(_ s: String) -> UInt8? {
 enum GamingWMI {
     static let setFanBehavior: UInt8 = 0x0E   // SetGamingFanBehavior
     static let getFanBehavior: UInt8 = 0x0F   // GetGamingFanBehavior
+    static let setFanSpeed: UInt8 = 0x10      // SetGamingFanSpeed: fan (1 CPU, 4 GPU), percent
     static let getKBBacklight: UInt8 = 0x15   // GetGamingKBBacklight
     static let setMisc: UInt8 = 0x16          // SetGamingMiscSetting
     static let getMisc: UInt8 = 0x17          // GetGamingMiscSetting
     static let fanCPU: UInt8 = 0x01, fanGPU: UInt8 = 0x08
     static let fanAutoBoth: [UInt8] = [0x09, 0x00, 0x41]  // 0x410009: bitmap CPU|GPU, CPU mode 1 (bits 17:16), GPU mode 1 (bits 23:22)
     static let fanMaxBoth: [UInt8] = [0x09, 0x00, 0x82]   // 0x820009: same with mode 2, the firmware's "turbo"
+    static let fanCustomBoth: [UInt8] = [0x09, 0x00, 0xC3]  // 0xC30009: same with mode 3, manual duty
+    static let fanSpeedCPU: UInt8 = 1, fanSpeedGPU: UInt8 = 4
+    static let fanMinPercent = 30   // the kext refuses less: no call can park a fan
+    static let apgeSet: UInt8 = 1, apgeGet: UInt8 = 2  // WMAA
+    static let usbChargeGet: [UInt8] = [0x04]
+    static let usbChargeSet: [Int: [UInt8]] = [0: [0x04, 0x1F, 0x0A], 10: [0x04, 0x0F, 0x0A], 20: [0x04, 0x0F, 0x14], 30: [0x04, 0x0F, 0x1E]]
+    static let kbTimeoutGet: [UInt8] = [0x01, 0x84, 0x08]
+    static let kbTimeoutOn: [UInt8] = [0x02, 0x84, 0x08, 0x00, 0x00, 0x1E], kbTimeoutOff: [UInt8] = [0x02, 0x84, 0x08]
     static let miscSupportedProfiles: UInt8 = 0x0A        // Linux: "unreliable on some models"
     static let miscPlatformProfile: UInt8 = 0x0B
     static let batteryGet: UInt8 = 0x14, batterySet: UInt8 = 0x15  // WMBE
@@ -223,9 +236,18 @@ func isAllowedFirmwareCall(_ selector: NitroECSelector, _ opcode: UInt8, _ bytes
         default: return false
         }
     }
+    if selector.rawValue == kNitroECSelWMAA.rawValue {
+        switch opcode {
+        case GamingWMI.apgeGet: return bytes == GamingWMI.usbChargeGet || bytes == GamingWMI.kbTimeoutGet
+        case GamingWMI.apgeSet: return GamingWMI.usbChargeSet.values.contains(bytes) || bytes == GamingWMI.kbTimeoutOn || bytes == GamingWMI.kbTimeoutOff
+        default: return false
+        }
+    }
     guard selector.rawValue == kNitroECSelWMBH.rawValue else { return false }
     switch opcode {
-    case GamingWMI.setFanBehavior: return bytes == GamingWMI.fanAutoBoth || bytes == GamingWMI.fanMaxBoth
+    case GamingWMI.setFanBehavior: return bytes == GamingWMI.fanAutoBoth || bytes == GamingWMI.fanMaxBoth || bytes == GamingWMI.fanCustomBoth
+    case GamingWMI.setFanSpeed:
+        return bytes.count == 2 && (bytes[0] == GamingWMI.fanSpeedCPU || bytes[0] == GamingWMI.fanSpeedGPU) && (GamingWMI.fanMinPercent...100).contains(Int(bytes[1]))
     case GamingWMI.getFanBehavior: return bytes == [GamingWMI.fanCPU] || bytes == [GamingWMI.fanGPU]
     case GamingWMI.getKBBacklight: return bytes == [1]
     case GamingWMI.setMisc: return bytes.count == 2 && bytes[0] == GamingWMI.miscPlatformProfile && powerModes.values.contains(bytes[1])
@@ -260,7 +282,7 @@ func checkedFirmware(_ reply: [UInt8], _ what: String, minBytes: Int = 1, status
     return reply
 }
 
-// MARK: - Fan behaviour (both fans; Auto or Max only)
+// MARK: - Fan behaviour (both fans; Auto, Max or a manual duty)
 
 func fanBehaviorName(_ mode: Int) -> String {
     switch mode {
@@ -282,6 +304,46 @@ func readFanBehavior(_ ec: NitroEC, gpu: Bool) throws -> Int {
 func setFanBehavior(_ ec: NitroEC, max: Bool) throws {
     _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanBehavior, max ? GamingWMI.fanMaxBoth : GamingWMI.fanAutoBoth),
                             "SetGamingFanBehavior")
+}
+
+// Manual duty: mode 3, then each fan's percent, as Linuwu-Sense does on this model. Under fanMinPercent nothing is sent.
+func setFanCustom(_ ec: NitroEC, cpu: Int, gpu: Int) throws {
+    let range = GamingWMI.fanMinPercent...100
+    guard range.contains(cpu), range.contains(gpu) else {
+        throw NitroECError(description: "fan duty must be \(range.lowerBound) to 100 %")
+    }
+    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanBehavior, GamingWMI.fanCustomBoth), "SetGamingFanBehavior custom")
+    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanSpeed, [GamingWMI.fanSpeedCPU, UInt8(cpu)]), "SetGamingFanSpeed CPU")
+    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanSpeed, [GamingWMI.fanSpeedGPU, UInt8(gpu)]), "SetGamingFanSpeed GPU")
+}
+
+// MARK: - USB charging and keyboard backlight timeout (Apge WMI, Linuwu-Sense's layouts)
+
+// Reply: status byte, 0x1F off or 0x0F on, then the battery level it stops at. 0 means off.
+func readUSBCharge(_ ec: NitroEC) throws -> Int {
+    let reply = try checkedFirmware(try ec.wmaa(GamingWMI.apgeGet, GamingWMI.usbChargeGet), "USB charging", minBytes: 3)
+    if reply[1] == 0x1F { return 0 }
+    guard reply[1] == 0x0F, GamingWMI.usbChargeSet[Int(reply[2])] != nil else {
+        throw NitroECError(description: "USB charging: unknown reply \(reply.map { hex($0) }.joined(separator: " "))")
+    }
+    return Int(reply[2])
+}
+
+func setUSBCharge(_ ec: NitroEC, _ value: Int) throws {
+    guard let bytes = GamingWMI.usbChargeSet[value] else { throw NitroECError(description: "USB charging takes 0, 10, 20 or 30") }
+    _ = try checkedFirmware(try ec.wmaa(GamingWMI.apgeSet, bytes), "USB charging")
+}
+
+func readKBTimeout(_ ec: NitroEC) throws -> Bool {
+    let reply = try checkedFirmware(try ec.wmaa(GamingWMI.apgeGet, GamingWMI.kbTimeoutGet), "Backlight timeout", minBytes: 6)
+    guard reply[2] == 0x08, reply[5] == 0 || reply[5] == 0x1E else {
+        throw NitroECError(description: "Backlight timeout: unknown reply \(reply.map { hex($0) }.joined(separator: " "))")
+    }
+    return reply[5] == 0x1E
+}
+
+func setKBTimeout(_ ec: NitroEC, _ on: Bool) throws {
+    _ = try checkedFirmware(try ec.wmaa(GamingWMI.apgeSet, on ? GamingWMI.kbTimeoutOn : GamingWMI.kbTimeoutOff), "Backlight timeout")
 }
 
 // MARK: - Power mode (misc setting 0x0B)
@@ -370,6 +432,8 @@ struct FirmwareReading: Codable, Equatable {
     var fanGPU: Int?
     var profile: Int?
     var supportedProfiles: Int?
+    var usbCharge: Int?         // 0 off, or the battery level it stops at; nil if the firmware does not have it
+    var kbTimeout: Bool?        // backlight off after 30 s; nil if the firmware does not have it
     var keyboard: [Int]?        // 0x15 reply: gmReturn, mode, speed, brightness, 0, direction, R, G, B... (Linuwu-Sense's layout)
     var raw: [String: [Int]] = [:]
     var errors: [String] = []
@@ -399,6 +463,11 @@ struct FirmwareReading: Codable, Equatable {
             if let r = ask("17 0A supported", minBytes: 2, { try ec.wmbh(GamingWMI.getMisc, [GamingWMI.miscSupportedProfiles]) }) { supportedProfiles = Int(r[1]) }
             if let r = ask("15 01 keyboard", minBytes: 1, { try ec.wmbh(GamingWMI.getKBBacklight, [1]) }) { keyboard = r.map(Int.init) }
         }
+        if nitroECOffers("NitroEC Apge WMI") {
+            // A refusal only means the firmware has no such setting: the app then leaves the row out.
+            usbCharge = try? readUSBCharge(ec)
+            kbTimeout = try? readKBTimeout(ec)
+        }
         self.raw = raw
         self.errors = errors
     }
@@ -419,6 +488,8 @@ func printFirmware(_ reading: FirmwareReading) {
     } else {
         print("Keyboard       not readable")
     }
+    print("USB charging   \(text(reading.usbCharge) { $0 == 0 ? "off" : "on, down to \($0) % of battery" })")
+    print("Backlight off  \(reading.kbTimeout.map { $0 ? "after 30 s" : "never" } ?? "not readable")")
     print("Raw replies:")
     for (label, bytes) in reading.raw.sorted(by: { $0.key < $1.key }) {
         print("  \(label): \(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))")

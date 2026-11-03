@@ -20,6 +20,7 @@ enum NitroECSelector {
     kNitroECSelModeState = 5, // out: struct[44] = TUGM, CCOL, IDPF, 0, then the M1..M5 mode tables: firmware fields,
                               // read only, no SMI, no root (needs an SSDT-NITRO with RMOD)
     kNitroECSelSetMode  = 6,  // in: scalar[0] = the index _Q30 switches on, 1..3. root only (needs an SSDT-NITRO with SMOD)
+    kNitroECSelWMAA     = 7,  // same shape as WMBH, for the Apge WMI (WMAA). root only, exact whitelist
     kNitroECSelCount
 };
 

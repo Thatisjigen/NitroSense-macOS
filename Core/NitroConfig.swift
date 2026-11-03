@@ -45,7 +45,9 @@ struct NitroConfig: Codable, Equatable {
     var kbTimeout = true
     var led = LEDConfig()
     // The only settings nitrod may re-apply, at start and after wake, and only once the user chose them with this version.
-    var userFan = ""          // "" (never chosen) | auto | max
+    var userFan = ""          // "" (never chosen) | auto | max | custom
+    var userFanCPU = 50       // percent, for custom
+    var userFanGPU = 50
     var userMode = ""         // "" (never chosen) | quiet | balance | performance
     // The GET calls answered at least once on this machine: from then on the app may ask for them by itself.
     var firmwareReadOK = false
@@ -54,7 +56,8 @@ struct NitroConfig: Codable, Equatable {
         func check(_ ok: Bool, _ what: String) throws {
             if !ok { throw NitroECError(description: "invalid config: \(what)") }
         }
-        try check(["", "auto", "max"].contains(userFan), "userFan must be empty, auto or max")
+        try check(["", "auto", "max", "custom"].contains(userFan), "userFan must be empty, auto, max or custom")
+        try check((GamingWMI.fanMinPercent...100).contains(userFanCPU) && (GamingWMI.fanMinPercent...100).contains(userFanGPU), "fan duty out of range")
         try check(userMode.isEmpty || powerModes[userMode] != nil, "userMode must be empty, quiet, balance or performance")
     }
 

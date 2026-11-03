@@ -6,7 +6,9 @@ let args = Array(CommandLine.arguments.dropFirst())
 let usage = """
 usage: nitroctl [status | dump | read <offset> | watch [seconds] | ecdiff | modes]
        sudo nitroctl firmware
-       sudo nitroctl fan status|auto|max
+       sudo nitroctl fan status|auto|max|custom <cpu %> <gpu %>
+       sudo nitroctl usb status|0|10|20|30
+       sudo nitroctl backlight status|on|off
        sudo nitroctl mode status|quiet|balance|performance
        sudo nitroctl kb status
        sudo nitroctl battery limit on|off|status
@@ -132,7 +134,35 @@ do {
         } catch {
             print("Charge limit   not readable (\(error))")
         }
+    case "usb":
+        guard args.count == 2 else { fail(usage) }
+        if args[1] != "status" {
+            guard let value = Int(args[1]), GamingWMI.usbChargeSet[value] != nil else { fail("usb takes status, 0, 10, 20 or 30") }
+            print("Before \(try readUSBCharge(ec))")
+            try setUSBCharge(ec, value)
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        print("USB charging when powered off: \(try readUSBCharge(ec))   (0 off, otherwise the battery level it stops at)")
+    case "backlight":
+        guard args.count == 2 else { fail(usage) }
+        if args[1] != "status" {
+            guard args[1] == "on" || args[1] == "off" else { fail("backlight takes status, on or off") }
+            print("Before \(try readKBTimeout(ec))")
+            try setKBTimeout(ec, args[1] == "on")
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        print("Backlight off after 30 s: \(try readKBTimeout(ec))")
     case "fan":
+        if args.count == 4, args[1] == "custom" {
+            guard let cpu = Int(args[2]), let gpu = Int(args[3]) else { fail("fan custom takes two percentages") }
+            printFans(ec, "Before")
+            let failure = attempt("Fan duty CPU \(cpu) %, GPU \(gpu) %") { try setFanCustom(ec, cpu: cpu, gpu: gpu) }
+            Thread.sleep(forTimeInterval: 0.5)
+            printFans(ec, "After ")
+            print("'sudo nitroctl fan auto' gives the fans back to the EC. nitroctl does not watch the temperature; the app and nitrod do.")
+            if failure { exit(1) }
+            exit(0)
+        }
         guard args.count == 2 else { fail(usage) }
         switch args[1] {
         case "status":
@@ -148,7 +178,7 @@ do {
             printFans(ec, "After ")
             if failure { exit(1) }
         default:
-            fail("fan takes status, auto or max: both fans together. Manual duty and the curve are left out on the \(Reg.model): 'nitroctl watch 1' shows the RPM")
+            fail("fan takes status, auto, max or custom <cpu %> <gpu %>")
         }
     case "mode":
         guard args.count == 2 else { fail(usage) }

@@ -1,5 +1,5 @@
 // Main window laid out like Acer NitroSense 3 (AN515-57): header bar, Fan Control panel with two fan dials, Power Plan and
-// Monitoring panels below. The keyboard backlight opens as an overlay dialog; the gear opens a settings menu. On the ANV15-52
+// Monitoring panels below. The gear opens a settings menu. On the ANV15-52
 // only what can work is clickable (Auto and Max, the three power modes, marked unverified, and the login item); the rest
 // says why it is not there.
 
@@ -11,7 +11,7 @@ func tempColor(_ t: Int) -> Color {
     t >= 90 ? .red : t >= 75 ? NS.orange : t >= 60 ? .yellow : .green
 }
 
-enum Overlay { case none, keyboard, curve }
+enum Overlay { case none, curve }
 
 let unverifiedFirmwareHelp = "Goes through the firmware's own mode route, TUGM and then _Q30, as on Linux for this model. It has not been tried on this board yet: the state is read back from EC FANT, and a mismatch shows as a warning."
 let fanFirmwareHelp = "Goes through the firmware's gaming WMI and is read back. On this board Max speeds the fans up."
@@ -44,14 +44,8 @@ struct MainView: View {
             if overlay != .none {
                 Color.black.opacity(0.55).ignoresSafeArea()
                     .onTapGesture { overlay = .none }
-                Group {
-                    if overlay == .keyboard {
-                        KeyboardPanel { overlay = .none }
-                    } else {
-                        CurvePanel { overlay = .none }
-                    }
-                }
-                .transition(.opacity)
+                CurvePanel { overlay = .none }
+                    .transition(.opacity)
             }
         }
         .frame(width: 900, height: 560)
@@ -102,7 +96,6 @@ struct HeaderBar: View {
                     .foregroundStyle(Color(white: 0.82))
                     .padding(.leading, 70)  // clear of the window buttons
                 Spacer()
-                HeaderIcon(icon: "keyboard", help: "Keyboard backlight (read only on this model)") { overlay = .keyboard }
                 HeaderIcon(icon: "gearshape.fill", help: "Settings") { showSettings.toggle() }
                     .popover(isPresented: $showSettings, arrowEdge: .bottom) {
                         SettingsMenu().environment(model)
@@ -138,11 +131,49 @@ struct HeaderIcon: View {
 
 // MARK: - Fan Control
 
-// Auto and Max only, both fans together. Custom duty and the curve stay out on this board: see NitroEC.cpp.
+// Both fans together. There is no curve: a manual duty stays where it is put, and nitrod goes back to Auto if it runs hot.
 let fanModeItems: [(mode: String, label: String, icon: String)] = [
     ("auto", "Auto", "fan"),
     ("max", "Max", "fan.fill"),
+    ("custom", "Custom", "slider.horizontal.3"),
 ]
+
+struct FanDutySliders: View {
+    @Environment(NitroModel.self) private var model
+    @State private var cpu = 50.0
+    @State private var gpu = 50.0
+
+    private func row(_ name: String, _ value: Binding<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(name)
+                Spacer()
+                Text("\(Int(value.wrappedValue)) %").monospacedDigit()
+            }
+            .font(.system(size: 11)).foregroundStyle(NS.dim)
+            Slider(value: value, in: Double(GamingWMI.fanMinPercent)...100, step: 5) { editing in
+                if !editing { model.setFanDuty(cpu: Int(cpu), gpu: Int(gpu)) }
+            }
+            .tint(NS.red)
+            .disabled(!model.control.canSetFan)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            row("CPU", $cpu)
+            row("GPU", $gpu)
+            Text("Back to Auto if the CPU reaches 95 °C or the RTX 87 °C.")
+                .font(.system(size: 10)).foregroundStyle(NS.dim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .onAppear {
+            cpu = Double(model.config.userFanCPU)
+            gpu = Double(model.config.userFanGPU)
+        }
+    }
+}
 
 struct FanControlPanel: View {
     @Environment(NitroModel.self) private var model
@@ -163,6 +194,8 @@ struct FanControlPanel: View {
                 }
                 .frame(width: 170)
                 .padding(.vertical, 6)
+
+                if model.currentFan == "custom" { FanDutySliders().frame(width: 190) }
 
                 Spacer()
                 HStack(spacing: 22) {
@@ -541,15 +574,30 @@ struct SettingsMenu: View {
         VStack(alignment: .leading, spacing: 8) {
             Section("Power Settings") {
                 BatteryLimitRow()
-                InfoRow(label: "USB charging when powered off", value: "not here",
-                        note: "No firmware route verified on this board")
+                if let usb = model.control.firmware?.usbCharge {
+                    HStack {
+                        Text("USB power when off").font(.system(size: 12))
+                        Spacer()
+                        Picker("", selection: Binding(get: { usb }, set: { model.setUSBCharge($0) })) {
+                            Text("Off").tag(0)
+                            Text("Down to 10 %").tag(10)
+                            Text("Down to 20 %").tag(20)
+                            Text("Down to 30 %").tag(30)
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+                    }
+                    .help("USB ports stay powered with the machine off, until the battery falls to this level")
+                }
             }
             Divider().overlay(Color(white: 0.25))
-            Section("Keyboard Settings") {
-                InfoRow(label: "Backlight off after 30 seconds", value: "not here",
-                        note: "No firmware route verified on this board")
+            // A setting the firmware does not answer for is not shown at all.
+            if let timeout = model.control.firmware?.kbTimeout {
+                Section("Keyboard Settings") {
+                    SettingRow(label: "Backlight off after 30 seconds", isOn: timeout) { model.setKBTimeout($0) }
+                }
+                Divider().overlay(Color(white: 0.25))
             }
-            Divider().overlay(Color(white: 0.25))
             Section("General") {
                 SettingRow(label: "Launch at login", isOn: launchAtLogin) { on in
                     LoginItem.set(on)
@@ -571,7 +619,10 @@ struct SettingsMenu: View {
         .padding(12)
         .frame(width: 290)
         .preferredColorScheme(.dark)
-        .onAppear { model.requestBatteryRead() }
+        .onAppear {
+            model.requestBatteryRead()
+            if model.control.firmware == nil, model.control.canRead { model.readFirmware() }
+        }
     }
 
     private var hasChoices: Bool { !model.config.userFan.isEmpty || !model.config.userMode.isEmpty }
@@ -722,7 +773,7 @@ struct MenuContent: View {
             }
             HStack(spacing: 6) {
                 UnverifiedTag(help: unverifiedFirmwareHelp)
-                Text(model.control.fanBlockedReason ?? model.control.modeBlockedReason ?? "Fan and power controls not yet proven on this board")
+                Text(model.control.fanBlockedReason ?? model.control.modeBlockedReason ?? "Power modes not yet proven on this board")
                     .font(.system(size: 10)).foregroundStyle(NS.dim)
             }
             Divider().overlay(Color(white: 0.25))

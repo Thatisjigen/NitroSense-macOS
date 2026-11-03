@@ -215,7 +215,7 @@ final class NitroModel {
     // Both fans in the same state, as the firmware last answered; nil when not read yet or when they differ.
     var currentFan: String? {
         guard let cpu = control.firmware?.fanCPU, let gpu = control.firmware?.fanGPU, cpu == gpu else { return nil }
-        return cpu == 1 ? "auto" : cpu == 2 ? "max" : nil
+        return cpu == 1 ? "auto" : cpu == 2 ? "max" : cpu == 3 ? "custom" : nil
     }
 
     // The firmware's answer if there is one, otherwise what the EC shows: FANT is set by _Q30 of the DSDT.
@@ -234,6 +234,14 @@ final class NitroModel {
     }
 
     func setFan(_ mode: String) { send(["cmd": "fan", "mode": mode], isStatus: false, isWrite: true, asksFirmware: true) }
+
+    func setFanDuty(cpu: Int, gpu: Int) {
+        send(["cmd": "fan", "mode": "custom", "cpu": cpu, "gpu": gpu], isStatus: false, isWrite: true, asksFirmware: true)
+    }
+
+    func setUSBCharge(_ value: Int) { send(["cmd": "usb", "value": value], isStatus: false, isWrite: true) }
+
+    func setKBTimeout(_ on: Bool) { send(["cmd": "backlight", "mode": on ? "on" : "off"], isStatus: false, isWrite: true) }
 
     func setPower(_ mode: String) { send(["cmd": "power", "mode": mode], isStatus: false, isWrite: true, asksFirmware: true) }
 

@@ -18,6 +18,7 @@ class NitroEC : public IOService {
     bool hasWMBX {false};   // ... WMBX (the SSDT of branch anv15-52-battery does not either)
     bool hasRMOD {false};   // ... RMOD (same)
     bool hasSMOD {false};   // ... SMOD (same)
+    bool hasWMAX {false};   // ... WMAX (same)
     bool fanLeftOffAuto {false};  // a call through this kext took the fans off Auto and none brought them back yet
 
 public:
@@ -32,10 +33,12 @@ public:
     IOReturn writeByte(uint32_t offset, uint32_t value);
     IOReturn callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength);
     IOReturn callWMBE(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength);
+    IOReturn callWMAA(uint32_t method, const uint8_t *in, uint8_t *out, uint32_t *outLength);
 
     static bool isWriteAllowed(uint32_t offset, uint32_t value);
     static bool isWMBHAllowed(uint32_t opcode, const uint8_t *in);
     static bool isWMBEAllowed(uint32_t method, const uint8_t *in);
+    static bool isWMAAAllowed(uint32_t method, const uint8_t *in);
 
 private:
     IOReturn readBuffer(const char *method, uint8_t *buffer, uint32_t size);
@@ -56,7 +59,8 @@ class NitroECUserClient : public IOUserClient {
     static IOReturn sWriteByte(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWMBH(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWMBE(OSObject *target, void *ref, IOExternalMethodArguments *args);
-    static IOReturn sWMI(OSObject *target, IOExternalMethodArguments *args, bool battery);
+    static IOReturn sWMAA(OSObject *target, void *ref, IOExternalMethodArguments *args);
+    static IOReturn sWMI(OSObject *target, IOExternalMethodArguments *args, int bank);
 
 public:
     bool initWithTask(task_t owningTask, void *securityID, UInt32 type) override;
