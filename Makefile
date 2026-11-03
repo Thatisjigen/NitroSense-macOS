@@ -37,21 +37,37 @@ $(KEXT)/Contents/Info.plist: Kext/Info.plist
 	@mkdir -p $(dir $@)
 	cp $< $@
 
+# Core/rusd.c reads the RTX telemetry through RM's structures: headers only, NVIDIA's open-gpu-kernel-modules at the version
+# the driver runs (NullMoth 2.6.6 = 615.78.08). rusd.c checks that version at run time. To get them:
+#   git clone --depth 1 --branch 615.78.08 --filter=blob:none --sparse https://github.com/NVIDIA/open-gpu-kernel-modules.git $(OPEN_GPU)
+#   git -C $(OPEN_GPU) sparse-checkout set src/common/sdk/nvidia/inc src/nvidia/arch/nvalloc/unix/include src/common/inc
+OPEN_GPU ?= open-gpu-615.78.08
+RM_INC   := -I$(OPEN_GPU)/src/common/sdk/nvidia/inc -I$(OPEN_GPU)/src/nvidia/arch/nvalloc/unix/include -I$(OPEN_GPU)/src/common/inc
+RUSD_OBJ := $(BUILD)/obj/rusd.o
+BRIDGE   := Core/NitroBridge.h
+BRIDGED  := $(BRIDGE) Core/rusd.h Kext/NitroECShared.h
+CORE_SRC := Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift
+
+$(RUSD_OBJ): Core/rusd.c Core/rusd.h
+	@mkdir -p $(dir $@)
+	@test -f "$(OPEN_GPU)/src/common/sdk/nvidia/inc/class/cl00de.h" || { echo "RM headers not found in $(OPEN_GPU): see the note in this Makefile"; exit 1; }
+	clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -Wall -Wno-unused-function $(RM_INC) -c Core/rusd.c -o $@
+
 cli: $(BUILD)/nitroctl
-$(BUILD)/nitroctl: CLI/main.swift Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift Kext/NitroECShared.h
+$(BUILD)/nitroctl: CLI/main.swift $(CORE_SRC) $(BRIDGED) $(RUSD_OBJ)
 	@mkdir -p $(BUILD)
-	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header Kext/NitroECShared.h Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift CLI/main.swift -o $@
+	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header $(BRIDGE) $(CORE_SRC) CLI/main.swift $(RUSD_OBJ) -o $@
 
 clean:
 	rm -rf $(BUILD)
 
 daemon: $(BUILD)/nitrod
-$(BUILD)/nitrod: Daemon/main.swift Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift Kext/NitroECShared.h
+$(BUILD)/nitrod: Daemon/main.swift $(CORE_SRC) $(BRIDGED) $(RUSD_OBJ)
 	@mkdir -p $(BUILD)
-	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header Kext/NitroECShared.h Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift Daemon/main.swift -o $@
+	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header $(BRIDGE) $(CORE_SRC) Daemon/main.swift $(RUSD_OBJ) -o $@
 
 APP     := $(BUILD)/NitroSense.app
-APP_SRC := App/NitroSenseApp.swift App/Model.swift App/Theme.swift App/Views.swift App/Dialogs.swift Core/NitroCore.swift Core/NitroConfig.swift Core/GPUStats.swift
+APP_SRC := App/NitroSenseApp.swift App/Model.swift App/Theme.swift App/Views.swift App/Dialogs.swift $(CORE_SRC)
 
 app: $(APP)/Contents/MacOS/NitroSense $(APP)/Contents/Info.plist $(APP)/Contents/Resources/AppIcon.icns \
 		$(APP)/Contents/Library/LaunchAgents/com.nitrosense.app.agent.plist
@@ -62,10 +78,10 @@ $(APP)/Contents/Library/LaunchAgents/com.nitrosense.app.agent.plist: App/LaunchA
 $(APP)/Contents/Resources/AppIcon.icns: App/Resources/AppIcon.icns
 	@mkdir -p $(dir $@)
 	cp $< $@
-$(APP)/Contents/MacOS/NitroSense: $(APP_SRC) Kext/NitroECShared.h
+$(APP)/Contents/MacOS/NitroSense: $(APP_SRC) $(BRIDGED) $(RUSD_OBJ)
 	@mkdir -p $(dir $@)
 	swiftc -O -swift-version 5 -parse-as-library -target x86_64-apple-macos15.0 \
-		-import-objc-header Kext/NitroECShared.h $(APP_SRC) -o $@
+		-import-objc-header $(BRIDGE) $(APP_SRC) $(RUSD_OBJ) -o $@
 $(APP)/Contents/Info.plist: App/Info.plist
 	@mkdir -p $(dir $@)
 	cp $< $@

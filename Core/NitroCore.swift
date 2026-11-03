@@ -126,7 +126,6 @@ func nitroECOffers(_ capability: String) -> Bool {
 enum Reg {
     static let model = "ANV15-52"
     static let cpuTemp: Int = 0x58        // CTMP, °C (50 idle, 97 under load, like Linux acpitz)
-    static let gpuTemp: Int = 0x59        // GTMP, °C (the NVPCF tables of the firmware read it as the GPU's; 0 under macOS with the RTX on)
     static let sysTemp: Int = 0x51        // ETP1, °C (45-62 in the dump; sensor unverified)
     static let extraTemps: [(String, Int)] = [("ETP2", 0x52), ("ETP3", 0x5A), ("ETP4", 0x5B), ("ETP5", 0x5E), ("ETP6", 0x5F)]
     static let cpuFanRPM: Int = 0x5C      // CPUF, 16-bit BIG-endian (1909 idle, 3743 under load)
@@ -145,20 +144,21 @@ func be16(_ ec: [UInt8], _ at: Int) -> Int { Int(ec[at]) << 8 | Int(ec[at + 1]) 
 
 func hex(_ v: UInt8) -> String { String(format: "0x%02X", v) }
 
+private var lastTelemetry = RTXTelemetry(at: .distantPast)
+
 func printStatus(_ ec: [UInt8]) {
     let extras = Reg.extraTemps.map { "\($0.0) \(ec[$0.1])" }.joined(separator: "  ")
-    let gpu = readGPUStats()
-    let gtmp = Int(ec[Reg.gpuTemp])
-    let rtxTemp = gpu.rtxTemp.map { "\($0) °C" }
-        ?? (gtmp > 0 ? "\(gtmp) °C (EC GTMP)" : "-- (\(gpu.tempNote ?? "no source"); EC GTMP reads 0)")
-    func load(_ v: Int?) -> String { v.map { "\($0) %" } ?? "--" }
+    // Not on every line of 'watch': one RM read every few seconds is plenty.
+    if Date().timeIntervalSince(lastTelemetry.at) >= 5 { lastTelemetry = readRTXTelemetry() }
+    let rtx = lastTelemetry.summary.map { "\($0) (RM shared data page)" } ?? "-- (\(lastTelemetry.problem ?? "not read"))"
+    let load = readRTXLoad().map { "\($0) %" } ?? "--"
     let fant = ec[Reg.fanTable] & 0x0F
     print("""
     \(Reg.model) EC (no EC byte is written on this branch; fields from an EC dump)
     Temperatures   CPU \(ec[Reg.cpuTemp]) °C (CTMP)   ETP1 \(ec[Reg.sysTemp])   \(extras) °C
-    RTX temp       \(rtxTemp)
+    RTX            \(rtx)
     Fans           CPU \(be16(ec, Reg.cpuFanRPM)) RPM (0x5C, big-endian)   GPU \(be16(ec, Reg.gpuFanRPM)) RPM (0x6A)
-    GPU load       RTX \(load(gpu.rtxLoad)) (NVAccel); the Iris Xe publishes no real figure
+    GPU load       RTX \(load) (NVAccel); the Iris Xe publishes no real figure
     Power          AC \(ec[Reg.acStatus] & 0x01 == 1 ? "plugged" : "unplugged")   PL1 \(Double(be16(ec, Reg.pl1)) / 10) W   PL2 \(Double(be16(ec, Reg.pl2)) / 10) W
     Lid            \(ec[Reg.lid] & 0x40 != 0 ? "closed" : "open")
     Keyboard       backlight bit KBBL \(ec[Reg.kbBacklight] & 0x01) (EC 0x48 bit 0, unverified; the Fn keys drive the backlight)
