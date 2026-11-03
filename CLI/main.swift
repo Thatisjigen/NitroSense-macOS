@@ -4,7 +4,7 @@ import Foundation
 
 let args = Array(CommandLine.arguments.dropFirst())
 let usage = """
-usage: nitroctl [status | dump | read <offset> | watch [seconds] | ecdiff | modes]
+usage: nitroctl [status | dump | read <offset> | watch [seconds] | ecdiff | modes | pcu]
        sudo nitroctl firmware
        sudo nitroctl fan status|auto|max|custom <cpu %> <gpu %>
        sudo nitroctl usb status|0|10|20|30
@@ -112,6 +112,15 @@ do {
         printStatus(try ec.dump())
     case "dump":
         printDump(try ec.dump())
+    case "pcu":
+        let meter = PCUMeter()
+        _ = meter.sample(ec)
+        Thread.sleep(forTimeInterval: 1.2)
+        guard let pcu = meter.sample(ec) else { fail("nothing from the CPU registers: they need the NitroEC.kext and SSDT-NITRO of this build") }
+        func w(_ v: Double?) -> String { v.map { String(format: "%.2f W", $0) } ?? "--" }
+        func t(_ v: Int?) -> String { v.map { "\($0) °C" } ?? "--" }
+        print("Package \(w(pcu.packageWatts)) \(t(pcu.packageTemp))   Cores \(w(pcu.coreWatts)) \(t(pcu.coreTemp))   Iris Xe \(w(pcu.igpuWatts)) \(t(pcu.igpuTemp))")
+        print("Raw \(pcu.raw.map { String($0, radix: 16) }.joined(separator: " "))   (energy P0, P1, units, energy package, GT_PERF_STATUS, temp package, P0, P1)")
     case "read":
         guard args.count == 2, let offset = parseOffset(args[1]) else { fail(usage) }
         print("\(hex(offset)) = \(hex(try ec.readByte(offset)))")

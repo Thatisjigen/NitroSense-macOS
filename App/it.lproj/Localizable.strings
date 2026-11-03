@@ -1,0 +1,111 @@
+/* Traduzione italiana di NitroSense per l'ANV15-52. */
+
+/* Pannelli e modalità */
+"Settings" = "Impostazioni";
+"Fan Control" = "Controllo ventole";
+"Power Plan" = "Piano energetico";
+"Monitoring" = "Monitoraggio";
+"Auto" = "Auto";
+"Max" = "Max";
+"Custom" = "Manuale";
+"Curve" = "Curva";
+"Quiet" = "Silenzioso";
+"Balance" = "Bilanciato";
+"Performance" = "Prestazioni";
+"Turbo" = "Turbo";
+"Eco" = "Eco";
+"Mode" = "Modalità";
+"AC" = "Rete";
+"Battery" = "Batteria";
+"Read firmware" = "Leggi firmware";
+"Edit curve" = "Modifica curva";
+
+/* Ventole */
+"Back to Auto if the CPU reaches 95 °C or the RTX 87 °C. 30 % is about 3700 RPM." = "Torna ad Auto se la CPU arriva a 95 °C o la RTX a 87 °C. 30 % sono circa 3700 giri.";
+"both %@" = "entrambe su %@";
+"CPU %@, GPU %@" = "CPU %@, GPU %@";
+"not readable" = "non leggibile";
+"not set (0)" = "non impostata (0)";
+"Firmware: %@, read %@" = "Firmware: %1$@, letto alle %2$@";
+"Firmware: %@" = "Firmware: %@";
+"State not read yet" = "Stato non ancora letto";
+"No source for this temperature" = "Nessuna fonte per questa temperatura";
+"Asks the firmware for the fan, mode, keyboard and charge limit state through nitrod. Each call is one SMI, so it never runs by itself until the first read has answered." = "Chiede al firmware, tramite nitrod, lo stato di ventole, modalità, tastiera e limite di carica. Ogni chiamata è uno SMI, quindi non parte da sola finché la prima lettura non ha risposto.";
+"Goes through the firmware's gaming WMI and is read back. On this board Max speeds the fans up." = "Passa dal WMI gaming del firmware e viene riletto. Su questa scheda Max accelera le ventole.";
+
+/* Curva */
+"Fan Curve" = "Curva delle ventole";
+"Used when Fan Control is set to Curve. The CPU fan follows the CPU temperature, the GPU fan the RTX one. Under the first point the firmware's Auto runs, quieter than any manual duty." = "Vale quando Controllo ventole è su Curva. La ventola CPU segue la temperatura della CPU, la ventola GPU quella della RTX. Sotto il primo punto lavora l'Auto del firmware, più silenzioso di qualsiasi velocità manuale.";
+"Add point" = "Aggiungi punto";
+"Revert" = "Annulla modifiche";
+"Save" = "Salva";
+"the curve takes 2 to 8 points" = "la curva vuole da 2 a 8 punti";
+"the curve's temperatures must be 30 to 100 °C" = "le temperature della curva devono stare fra 30 e 100 °C";
+"the curve's duties must be 20 to 100 %" = "le velocità della curva devono stare fra 20 e 100 %";
+"the curve's temperatures must rise from point to point" = "le temperature della curva devono salire da un punto all'altro";
+"the curve's duty must not fall as the temperature rises" = "la velocità della curva non può scendere mentre la temperatura sale";
+"the curve must reach 100 % by 90 °C" = "la curva deve arrivare a 100 % entro 90 °C";
+
+/* Piano energetico */
+"Current power source: an indicator, not a switch" = "Alimentazione attuale: è un'indicazione, non un interruttore";
+"Goes through the firmware's own mode route, TUGM and then _Q30, and is read back from EC FANT. Quiet can stop the fans when idle." = "Passa dalla via del firmware per le modalità, TUGM e poi _Q30, e viene riletta da EC FANT. Silenzioso può fermare le ventole a riposo.";
+"no EC data" = "nessun dato dall'EC";
+"Mode unknown (%@)" = "Modalità sconosciuta (%@)";
+". To change it: %@." = ". Per cambiarla: %@.";
+"%@, firmware at %@" = "%1$@, firmware alle %2$@";
+"; EC FANT says %@" = "; EC FANT dice %@";
+"%@, read from EC FANT" = "%@, letto da EC FANT";
+" (not offered here)" = " (non offerta qui)";
+
+/* Monitoraggio */
+"Temperature (°C)" = "Temperatura (°C)";
+"Loading (%)" = "Carico (%)";
+"Power (W)" = "Potenza (W)";
+"Temp" = "Temp";
+"Load" = "Carico";
+"Power" = "Potenza";
+"On battery: %.1f W" = "A batteria: %.1f W";
+"Whole-machine draw from the battery" = "Consumo di tutto il PC dalla batteria";
+"    Peak : %.0f W" = "    Picco : %.0f W";
+"CPU power = Intel package (cores + iGPU + system agent), from powermetrics" = "Potenza CPU = package Intel (core + iGPU + system agent), da powermetrics";
+"Load from the IORegistry (NVAccel). Temperature, power and clock from RM's shared data page, every 5 s with this window open, every minute otherwise." = "Carico dall'IORegistry (NVAccel). Temperatura, potenza e frequenza dalla pagina condivisa di RM, ogni 5 s con questa finestra aperta, altrimenti ogni minuto.";
+"No RTX numbers now: %@." = "Nessun dato RTX ora: %@.";
+"Load: share of time the Iris Xe is active, from powermetrics (GPU Active). Temperature and power: the CPU's own registers for its graphics plane. This power is also inside the CPU figure." = "Carico: quota di tempo in cui la Iris Xe è attiva, da powermetrics (GPU Active). Temperatura e potenza: i registri della CPU per la sua parte grafica. Questa potenza è compresa anche nel dato della CPU.";
+
+/* Impostazioni */
+"Power Settings" = "Alimentazione";
+"Battery charge limit (80%)" = "Limite di carica della batteria (80%)";
+"USB power when off" = "USB a PC spento";
+"Off" = "No";
+"Down to 10 %" = "Fino al 10 %";
+"Down to 20 %" = "Fino al 20 %";
+"Down to 30 %" = "Fino al 30 %";
+"USB ports stay powered with the machine off, until the battery falls to this level" = "Le porte USB restano alimentate a PC spento, finché la batteria non scende a questo livello";
+"Keyboard Settings" = "Tastiera";
+"Backlight off after 30 seconds" = "Luce spenta dopo 30 secondi";
+"General" = "Generali";
+"Launch at login" = "Avvia al login";
+"Service" = "Servizio";
+"nitrod running" = "nitrod attivo";
+"nitrod not reachable" = "nitrod non raggiungibile";
+"Re-apply my settings" = "Riapplica le scelte";
+"Nothing to re-apply: nitrod re-applies only what you chose in this version, at start and after wake." = "Niente da riapplicare: nitrod riapplica solo ciò che hai scelto in questa versione, all'avvio e dopo lo stop.";
+"Fan: %@. Power mode: %@." = "Ventole: %1$@. Modalità: %2$@.";
+"not chosen" = "non scelta";
+"on" = "attivo";
+"off" = "disattivo";
+"not read" = "non letto";
+"not read yet" = "non ancora letto";
+
+/* Motivi per cui un comando è grigio */
+"nitrod is not reachable" = "nitrod non è raggiungibile";
+"needs the nitrod of this build" = "serve il nitrod di questa build";
+"needs the kext and SSDT of this build, then a reboot" = "servono kext e SSDT di questa build, poi un riavvio";
+"press Read firmware first" = "premi prima Leggi firmware";
+"the firmware did not answer the fan read" = "il firmware non ha risposto alla lettura delle ventole";
+"the firmware did not answer the mode read" = "il firmware non ha risposto alla lettura della modalità";
+"the loaded kext and SSDT offer no battery WMI" = "kext e SSDT caricati non offrono il WMI della batteria";
+
+/* Barra dei menu */
+"Open NitroSense" = "Apri NitroSense";
+"Quit" = "Esci";

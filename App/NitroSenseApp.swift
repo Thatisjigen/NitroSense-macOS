@@ -187,8 +187,17 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
     custom.rtx = model.rtx
     custom.rtxLoad = model.rtxLoad
     custom.igpuLoad = 12
+    custom.igpuTemp = 48
+    custom.igpuPower = 3.4
     custom.control = ready.control
     custom.control.firmware = customReading
+    let curve = NitroModel(preview: true)  // the curve, and its editor
+    curve.config = model.config
+    curve.config.userFan = "curve"
+    curve.snapshot = model.snapshot
+    curve.rtx = model.rtx
+    curve.rtxLoad = model.rtxLoad
+    curve.control = ready.control
     let busy = NitroModel(preview: true)  // 5 min of made-up samples to check the hover tooltip
     busy.config = model.config
     busy.snapshot = model.snapshot
@@ -198,13 +207,16 @@ func renderSnapshots(_ model: NitroModel, to dir: URL) {
         let t = Double(i)
         return Sample(date: Date().addingTimeInterval(Double(i - 150) * 2), cpuTemp: 60 + Int(15 * sin(t / 12)), gpuTemp: nil,
                       cpuLoad: 30 + Int(25 * sin(t / 9)), cpuPower: 20 + 15 * sin(t / 10),
-                      rtxLoad: 25 + Int(20 * sin(t / 7)), rtxPower: 18 + 8 * sin(t / 8))
+                      rtxLoad: 25 + Int(20 * sin(t / 7)), rtxPower: 18 + 8 * sin(t / 8),
+                      igpuLoad: 20 + Int(15 * sin(t / 5)), igpuTemp: 50 + Int(6 * sin(t / 11)), igpuPower: 4 + 3 * sin(t / 6))
     }
     let pages: [(String, AnyView, NitroModel)] = [
         ("monitoring-hover", AnyView(MonitoringPanel().frame(width: 680, height: 300)), busy),
         ("main", AnyView(MainView()), model),
         ("main-ready", AnyView(MainView()), ready),
         ("main-custom", AnyView(MainView()), custom),
+        ("main-curve", AnyView(MainView()), curve),
+        ("curve-editor", AnyView(CurvePanel(close: {})), curve),
         ("settings-custom", AnyView(SettingsMenu().background(Color(white: 0.16))), custom),
         ("settings", AnyView(SettingsMenu().background(Color(white: 0.16))), model),
         ("settings-ready", AnyView(SettingsMenu().background(Color(white: 0.16))), ready),

@@ -118,6 +118,18 @@ final class NitroEC {
         }
     }
 
+    // Primary plane energy, secondary plane (Iris Xe) energy, units, package energy, GT_PERF_STATUS, package, primary and
+    // secondary plane temperature. A plain read, no SMI, no root.
+    func pcu() throws -> [UInt32] {
+        var buffer = [UInt32](repeating: 0, count: Int(kNitroECPCUSize) / 4)
+        var size = Int(kNitroECPCUSize)
+        let kr = IOConnectCallStructMethod(connection, UInt32(kNitroECSelPCU.rawValue), nil, 0, &buffer, &size)
+        guard kr == KERN_SUCCESS, size == Int(kNitroECPCUSize) else {
+            throw NitroECError(description: "CPU registers not readable (0x\(String(UInt32(bitPattern: kr), radix: 16))): they need the NitroEC.kext and SSDT-NITRO of this build")
+        }
+        return buffer
+    }
+
     // TUGM, CCOL, IDPF, 0, then the M1..M5 tables. A plain read, no SMI, no root.
     func modeState() throws -> [UInt8] {
         var buffer = [UInt8](repeating: 0, count: Int(kNitroECModeStateSize))
@@ -127,6 +139,44 @@ final class NitroEC {
             throw NitroECError(description: "mode fields not readable (0x\(String(UInt32(bitPattern: kr), radix: 16))): they need the NitroEC.kext and SSDT-NITRO of branch anv15-52-control")
         }
         return buffer
+    }
+}
+
+// What the CPU says about itself through RPCU. nil where the registers give nothing believable. Watts come from two readings of the
+// energy counters, at least a second apart.
+struct PCUSample {
+    var packageWatts: Double?, coreWatts: Double?, igpuWatts: Double?
+    var packageTemp: Int?, coreTemp: Int?, igpuTemp: Int?
+    var raw: [UInt32] = []
+}
+
+final class PCUMeter {
+    private var last: (at: UInt64, regs: [UInt32])?
+    private var current = PCUSample()
+
+    func sample(_ ec: NitroEC) -> PCUSample? {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last, now - last.at < 1_000_000_000 { return current }
+        guard let regs = try? ec.pcu(), regs.contains(where: { $0 != 0 }) else { return nil }
+        var next = PCUSample(raw: regs)
+        func temp(_ v: UInt32) -> Int? { let t = Int(v & 0xFF); return (5...115).contains(t) ? t : nil }
+        next.packageTemp = temp(regs[5])
+        next.coreTemp = temp(regs[6])
+        next.igpuTemp = temp(regs[7])
+        let energyBits = (regs[2] >> 8) & 0x1F
+        if let last, energyBits > 0, now - last.at < 60_000_000_000 {
+            let seconds = Double(now - last.at) / 1e9, joule = 1 / Double(UInt64(1) << UInt64(energyBits))
+            func watts(_ i: Int) -> Double? {
+                let w = Double(regs[i] &- last.regs[i]) * joule / seconds
+                return (0...300).contains(w) ? w : nil
+            }
+            next.coreWatts = watts(0)
+            next.igpuWatts = watts(1)
+            next.packageWatts = watts(3)
+        }
+        last = (now, regs)
+        current = next
+        return next
     }
 }
 
@@ -217,7 +267,7 @@ enum GamingWMI {
     static let fanMaxBoth: [UInt8] = [0x09, 0x00, 0x82]   // 0x820009: same with mode 2, the firmware's "turbo"
     static let fanCustomBoth: [UInt8] = [0x09, 0x00, 0xC3]  // 0xC30009: same with mode 3, manual duty
     static let fanSpeedCPU: UInt8 = 1, fanSpeedGPU: UInt8 = 4
-    static let fanMinPercent = 30   // the kext refuses less: no call can park a fan
+    static let fanMinPercent = 20   // the kext refuses less: no call can park a fan
     static let apgeSet: UInt8 = 1, apgeGet: UInt8 = 2  // WMAA
     static let usbChargeGet: [UInt8] = [0x04]
     static let usbChargeSet: [Int: [UInt8]] = [0: [0x04, 0x1F, 0x0A], 10: [0x04, 0x0F, 0x0A], 20: [0x04, 0x0F, 0x14], 30: [0x04, 0x0F, 0x1E]]
@@ -304,6 +354,15 @@ func readFanBehavior(_ ec: NitroEC, gpu: Bool) throws -> Int {
 func setFanBehavior(_ ec: NitroEC, max: Bool) throws {
     _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanBehavior, max ? GamingWMI.fanMaxBoth : GamingWMI.fanAutoBoth),
                             "SetGamingFanBehavior")
+}
+
+// One fan's manual duty, with mode 3 already on.
+func setFanSpeed(_ ec: NitroEC, gpu: Bool, percent: Int) throws {
+    guard (GamingWMI.fanMinPercent...100).contains(percent) else {
+        throw NitroECError(description: "fan duty must be \(GamingWMI.fanMinPercent) to 100 %")
+    }
+    _ = try checkedFirmware(try ec.wmbh(GamingWMI.setFanSpeed, [gpu ? GamingWMI.fanSpeedGPU : GamingWMI.fanSpeedCPU, UInt8(percent)]),
+                            gpu ? "SetGamingFanSpeed GPU" : "SetGamingFanSpeed CPU")
 }
 
 // Manual duty: mode 3, then each fan's percent, as Linuwu-Sense does on this model. Under fanMinPercent nothing is sent.

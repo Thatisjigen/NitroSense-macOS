@@ -68,7 +68,7 @@ struct NSPanel<Content: View, Accessory: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
-                Text(title)
+                Text(L(title))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(NS.text)
                     .padding(.leading, 10)
@@ -132,7 +132,7 @@ struct HexRadio: View {
                     .overlay(HexShape(point: 0.35).stroke(selected ? Color(red: 1, green: 0.4, blue: 0.35) : Color(white: 0.36), lineWidth: 1))
                     .frame(width: 18, height: 12)
                     .shadow(color: selected ? NS.red : .clear, radius: 3)
-                Text(label).font(.system(size: 12)).foregroundStyle(selected ? NS.text : NS.dim)
+                Text(L(label)).font(.system(size: 12)).foregroundStyle(selected ? NS.text : NS.dim)
             }
             .contentShape(Rectangle())
         }
@@ -234,7 +234,7 @@ struct NSListItem: View {
                     .frame(width: 24)
                     .foregroundStyle(selected ? NS.red : NS.faint)
                     .shadow(color: selected ? NS.red.opacity(0.7) : .clear, radius: 4)
-                Text(label).font(.system(size: 12)).foregroundStyle(selected ? NS.red : NS.dim)
+                Text(L(label)).font(.system(size: 12)).foregroundStyle(selected ? NS.red : NS.dim)
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -262,7 +262,7 @@ struct NSButton: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 if let icon { Image(systemName: icon) }
-                Text(label)
+                Text(L(label))
             }
             .font(.system(size: 11))
             .foregroundStyle(NS.dim)

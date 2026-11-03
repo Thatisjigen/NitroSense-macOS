@@ -42,7 +42,7 @@ enum : uint32_t {
     // Third byte of the uint64: both fans in Auto (mode 1, 0x410009), Max (mode 2, firmware "turbo", 0x820009) or Custom (mode 3,
     // 0xC30009). A manual duty under kFanSpeedMin is refused, so that no call can park a fan.
     kFanAutoByte = 0x41, kFanMaxByte = 0x82, kFanCustomByte = 0xC3,
-    kFanSpeedCPU = 1, kFanSpeedGPU = 4, kFanSpeedMin = 30,
+    kFanSpeedCPU = 1, kFanSpeedGPU = 4, kFanSpeedMin = 20,
 
     kMiscSupportedProfiles = 0x0A,  // read only
     kMiscPlatformProfile   = 0x0B,
@@ -136,6 +136,7 @@ bool NitroEC::start(IOService *provider) {
     hasRMOD = acpi->validateObject("RMOD") == kIOReturnSuccess;
     hasSMOD = acpi->validateObject("SMOD") == kIOReturnSuccess;
     hasWMAX = acpi->validateObject("WMAX") == kIOReturnSuccess;
+    hasRPCU = acpi->validateObject("RPCU") == kIOReturnSuccess;
 
     uint8_t cpuTemp = 0;
     if (readByte(0x58, &cpuTemp) == kIOReturnSuccess)   // CTMP on the ANV15-52
@@ -148,6 +149,7 @@ bool NitroEC::start(IOService *provider) {
     setProperty("NitroEC Mode State", hasRMOD);
     setProperty("NitroEC Power Mode", hasSMOD);
     setProperty("NitroEC Apge WMI", hasWMAX);
+    setProperty("NitroEC PCU", hasRPCU);
     registerService();
     return true;
 }
@@ -230,6 +232,14 @@ IOReturn NitroEC::modeState(uint8_t *buffer, uint32_t length) {
     if (!hasRMOD)
         return kIOReturnUnsupported;
     return readBuffer("RMOD", buffer, kNitroECModeStateSize);
+}
+
+IOReturn NitroEC::pcu(uint8_t *buffer, uint32_t length) {
+    if (!buffer || length < kNitroECPCUSize)
+        return kIOReturnBadArgument;
+    if (!hasRPCU)
+        return kIOReturnUnsupported;
+    return readBuffer("RPCU", buffer, kNitroECPCUSize);
 }
 
 // Performance, Balance and Quiet only, as _Q30 numbers them; Turbo (0) and Eco (4) stay out.
@@ -358,6 +368,7 @@ const IOExternalMethodDispatch NitroECUserClient::methods[kNitroECSelCount] = {
     [kNitroECSelModeState] = {&NitroECUserClient::sModeState, 0, 0, 0, kNitroECModeStateSize},
     [kNitroECSelSetMode]   = {&NitroECUserClient::sSetMode, 1, 0, 0, 0},
     [kNitroECSelWMAA]      = {&NitroECUserClient::sWMAA, 1, kNitroECWMBHInSize, 0, kIOUCVariableStructureSize},
+    [kNitroECSelPCU]       = {&NitroECUserClient::sPCU, 0, 0, 0, kNitroECPCUSize},
 };
 
 bool NitroECUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type) {
@@ -409,6 +420,13 @@ IOReturn NitroECUserClient::sModeState(OSObject *target, void *, IOExternalMetho
     if (args->structureOutputSize < kNitroECModeStateSize)
         return kIOReturnBadArgument;
     return self->owner->modeState(static_cast<uint8_t *>(args->structureOutput), kNitroECModeStateSize);
+}
+
+IOReturn NitroECUserClient::sPCU(OSObject *target, void *, IOExternalMethodArguments *args) {
+    auto self = static_cast<NitroECUserClient *>(target);
+    if (args->structureOutputSize < kNitroECPCUSize)
+        return kIOReturnBadArgument;
+    return self->owner->pcu(static_cast<uint8_t *>(args->structureOutput), kNitroECPCUSize);
 }
 
 IOReturn NitroECUserClient::sSetMode(OSObject *target, void *, IOExternalMethodArguments *args) {

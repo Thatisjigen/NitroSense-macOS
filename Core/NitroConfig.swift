@@ -1,7 +1,8 @@
 // Settings that nitrod keeps, plus the socket client used by nitroctl and the app to talk to the daemon.
 //
-// ANV15-52: only userFan and userMode mean anything, and they stay empty until the user chooses with this version. The
-// other keys are the upstream shape, kept so that the config.json of an earlier install still loads; nothing reads them.
+// ANV15-52: only userFan, userFanCPU, userFanGPU, fan.curve and userMode mean anything, and the choices stay empty until the user
+// chooses with this version. The other keys are the upstream shape, kept so that the config.json of an earlier install still loads;
+// nothing reads them.
 
 import Foundation
 
@@ -14,6 +15,24 @@ struct FanCurvePoint: Codable, Equatable {
     var percent: Int  // duty 20-100
 }
 
+// What upstream's default was, saved by earlier installs without anyone choosing it. At idle this CPU sits over its first point, and a
+// manual duty is far louder here than Auto at idle (measured: 30 % 3700 RPM, 50 % 4800, 80 % 6700; Auto at idle 2200).
+let upstreamDefaultCurve = [FanCurvePoint(temp: 50, percent: 30), FanCurvePoint(temp: 60, percent: 40),
+                            FanCurvePoint(temp: 70, percent: 55), FanCurvePoint(temp: 80, percent: 75),
+                            FanCurvePoint(temp: 88, percent: 100)]
+
+// Percent for a temperature: straight lines between the points, flat after the last, in steps of 5. nil under the first point: the
+// firmware's Auto runs there, quieter than any manual duty.
+func curvePercent(_ curve: [FanCurvePoint], temp: Int) -> Int? {
+    guard let first = curve.first, let last = curve.last, temp >= first.temp else { return nil }
+    if temp >= last.temp { return last.percent }
+    for (a, b) in zip(curve, curve.dropFirst()) where temp <= b.temp {
+        let p = Double(a.percent) + Double(temp - a.temp) * Double(b.percent - a.percent) / Double(b.temp - a.temp)
+        return min(max(Int((p / 5).rounded()) * 5, a.percent), b.percent)
+    }
+    return last.percent
+}
+
 struct FanConfig: Codable, Equatable {
     var mode = "auto"  // auto | max | manual | curve
     var cpuPercent = 60
@@ -23,9 +42,8 @@ struct FanConfig: Codable, Equatable {
     var curveGPU = false
     // Both fans go to max at this temperature (any mode) until 10 °C below it.
     var failsafeTemp = 95
-    var curve = [FanCurvePoint(temp: 50, percent: 30), FanCurvePoint(temp: 60, percent: 40),
-                 FanCurvePoint(temp: 70, percent: 55), FanCurvePoint(temp: 80, percent: 75),
-                 FanCurvePoint(temp: 88, percent: 100)]
+    var curve = [FanCurvePoint(temp: 60, percent: 30), FanCurvePoint(temp: 70, percent: 45),
+                 FanCurvePoint(temp: 80, percent: 70), FanCurvePoint(temp: 86, percent: 100)]
 }
 
 struct LEDConfig: Codable, Equatable {
@@ -45,7 +63,7 @@ struct NitroConfig: Codable, Equatable {
     var kbTimeout = true
     var led = LEDConfig()
     // The only settings nitrod may re-apply, at start and after wake, and only once the user chose them with this version.
-    var userFan = ""          // "" (never chosen) | auto | max | custom
+    var userFan = ""          // "" (never chosen) | auto | max | custom | curve
     var userFanCPU = 50       // percent, for custom
     var userFanGPU = 50
     var userMode = ""         // "" (never chosen) | quiet | balance | performance
@@ -56,7 +74,8 @@ struct NitroConfig: Codable, Equatable {
         func check(_ ok: Bool, _ what: String) throws {
             if !ok { throw NitroECError(description: "invalid config: \(what)") }
         }
-        try check(["", "auto", "max", "custom"].contains(userFan), "userFan must be empty, auto, max or custom")
+        try check(["", "auto", "max", "custom", "curve"].contains(userFan), "userFan must be empty, auto, max, custom or curve")
+        try validateFanCurve(fan.curve)
         try check((GamingWMI.fanMinPercent...100).contains(userFanCPU) && (GamingWMI.fanMinPercent...100).contains(userFanGPU), "fan duty out of range")
         try check(userMode.isEmpty || powerModes[userMode] != nil, "userMode must be empty, quiet, balance or performance")
     }
@@ -71,6 +90,23 @@ struct NitroConfig: Codable, Equatable {
         let data = try JSONSerialization.data(withJSONObject: merged)
         return try JSONDecoder().decode(NitroConfig.self, from: data)
     }
+}
+
+// The curve drives the fans with no other limit on them, so it has to end at full speed before it gets hot.
+func validateFanCurve(_ curve: [FanCurvePoint]) throws {
+    func check(_ ok: Bool, _ what: String) throws {
+        if !ok { throw NitroECError(description: what) }
+    }
+    try check((2...8).contains(curve.count), "the curve takes 2 to 8 points")
+    for p in curve {
+        try check((30...100).contains(p.temp), "the curve's temperatures must be 30 to 100 °C")
+        try check((GamingWMI.fanMinPercent...100).contains(p.percent), "the curve's duties must be \(GamingWMI.fanMinPercent) to 100 %")
+    }
+    for (a, b) in zip(curve, curve.dropFirst()) {
+        try check(a.temp < b.temp, "the curve's temperatures must rise from point to point")
+        try check(a.percent <= b.percent, "the curve's duty must not fall as the temperature rises")
+    }
+    try check(curve.last?.percent == 100 && (curve.last?.temp ?? 100) <= 90, "the curve must reach 100 % by 90 °C")
 }
 
 private func deepMerge(_ base: [String: Any], _ patch: [String: Any], path: String) throws -> [String: Any] {

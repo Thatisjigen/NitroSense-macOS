@@ -67,11 +67,16 @@ $(BUILD)/nitrod: Daemon/main.swift $(CORE_SRC) $(BRIDGED) $(RUSD_OBJ)
 	swiftc -O -target x86_64-apple-macos15.0 -import-objc-header $(BRIDGE) $(CORE_SRC) Daemon/main.swift $(RUSD_OBJ) -o $@
 
 APP     := $(BUILD)/NitroSense.app
-APP_SRC := App/NitroSenseApp.swift App/Model.swift App/Theme.swift App/Views.swift App/Dialogs.swift $(CORE_SRC)
+APP_SRC := App/NitroSenseApp.swift App/Model.swift App/Theme.swift App/Views.swift App/Dialogs.swift App/Localization.swift $(CORE_SRC)
 
 app: $(APP)/Contents/MacOS/NitroSense $(APP)/Contents/Info.plist $(APP)/Contents/Resources/AppIcon.icns \
+		$(APP)/Contents/Resources/it.lproj/Localizable.strings \
 		$(APP)/Contents/Library/LaunchAgents/com.nitrosense.app.agent.plist
 	codesign -f -s - $(APP)
+$(APP)/Contents/Resources/it.lproj/Localizable.strings: App/it.lproj/Localizable.strings
+	@mkdir -p $(dir $@)
+	plutil -lint $<
+	cp $< $@
 $(APP)/Contents/Library/LaunchAgents/com.nitrosense.app.agent.plist: App/LaunchAgents/com.nitrosense.app.agent.plist
 	@mkdir -p $(dir $@)
 	cp $< $@

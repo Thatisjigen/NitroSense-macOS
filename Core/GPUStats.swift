@@ -16,6 +16,43 @@
 import Foundation
 import IOKit
 
+// A temperature from an SMC key of type sp78, as any user, with no RM call: TG0D is what SMCNvidiaGPU publishes for the RTX since the
+// build that reads RM, so nitrod can look at it every few seconds at any time, around a sleep too.
+final class SMCReader {
+    private var connection: io_connect_t = 0
+
+    init?() {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        guard IOServiceOpen(service, mach_task_self_, 0, &connection) == KERN_SUCCESS else { return nil }
+    }
+
+    deinit { IOServiceClose(connection) }
+
+    // The 80-byte call of AppleSMC: key at 0, data size at 28, data type at 32, result at 40, command at 42, bytes at 48.
+    private func call(_ key: UInt32, command: UInt8, size: UInt32 = 0) -> [UInt8]? {
+        var input = [UInt8](repeating: 0, count: 80), output = [UInt8](repeating: 0, count: 80)
+        withUnsafeBytes(of: key) { input.replaceSubrange(0..<4, with: $0) }
+        withUnsafeBytes(of: size) { input.replaceSubrange(28..<32, with: $0) }
+        input[42] = command
+        var outSize = output.count
+        guard IOConnectCallStructMethod(connection, 2, input, input.count, &output, &outSize) == KERN_SUCCESS, output[40] == 0 else { return nil }
+        return output
+    }
+
+    func temperature(_ name: String) -> Int? {
+        let key = name.utf8.reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        guard let info = call(key, command: 9) else { return nil }
+        let size = info[28..<32].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        let type = info[32..<36].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        guard size >= 2, type == 0x7370_3738 /* sp78 */, let data = call(key, command: 5, size: size) else { return nil }
+        let raw = Int16(bitPattern: UInt16(data[48]) << 8 | UInt16(data[49]))
+        let celsius = Int((Double(raw) / 256).rounded())
+        return (1...125).contains(celsius) ? celsius : nil
+    }
+}
+
 func readRTXLoad() -> Int? {
     let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"))
     guard service != 0 else { return nil }

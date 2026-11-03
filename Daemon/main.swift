@@ -119,6 +119,10 @@ final class Daemon {
     var igpuChecks = 0
     var igpuActive: Double?
     var igpuActiveAt = Date.distantPast
+    let pcuMeter = PCUMeter()
+    lazy var hasPCU = nitroECOffers("NitroEC PCU")
+    var curveSent: (cpu: Int, gpu: Int)?  // the duties the curve last sent; nil while the firmware's Auto runs
+    let smc = SMCReader()
     lazy var powerMeter = PowerMeter(onSample: { [weak self] watts in
         self?.cpuPower = watts
         self?.cpuPowerAt = Date()
@@ -133,6 +137,7 @@ final class Daemon {
            let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let cfg = try? NitroConfig().merged(with: saved), (try? cfg.validate()) != nil {
             config = cfg
+            if config.fan.curve == upstreamDefaultCurve { config.fan.curve = FanConfig().curve }
             log("loaded \(nitrodConfigPath); user choices: fan '\(cfg.userFan)', power '\(cfg.userMode)'")
         } else {
             config = NitroConfig()
@@ -204,7 +209,13 @@ final class Daemon {
                 log("apply (\(reason)): power mode: \(error)")
             }
         }
-        if !config.userFan.isEmpty {
+        // The curve's next tick decides: it sends everything again after this.
+        if config.userFan == "curve" {
+            log("apply (\(reason)): fans follow the curve")
+            curveSent = nil
+            fanOffAuto = true
+            checkFanCurve()
+        } else if !config.userFan.isEmpty {
             let wanted = config.userFan == "custom" ? 3 : config.userFan == "max" ? 2 : 1
             do {
                 let cpu = try readFanBehavior(ec, gpu: false), gpu = try readFanBehavior(ec, gpu: true)
@@ -232,6 +243,7 @@ final class Daemon {
         timer.schedule(deadline: .now() + 5, repeating: 5)
         timer.setEventHandler { [weak self] in
             self?.checkFanLimits()
+            self?.checkFanCurve()
             self?.checkIGPUReading()
         }
         timer.resume()
@@ -248,10 +260,65 @@ final class Daemon {
         powerMeter.restart()
     }
 
+    // Curve: each fan follows its own temperature, CPU the CPU and GPU the RTX. Under the curve's first point for both, the firmware's
+    // Auto, which runs slower than any manual duty. A duty goes down only 3 °C after it could: no back and forth around a step. Each
+    // change is one SMI, so only changes are sent. A failure leaves the fans to Auto, for good until the user chooses again.
+    private func checkFanCurve() {
+        guard config.userFan == "curve", gamingWMI else { curveSent = nil; return }
+        guard let dump = try? ec.dump() else { return }
+        let cpuTemp = Int(dump[Reg.cpuTemp])
+        guard cpuTemp > 0 else { return }
+        let gpuTemp = smc?.temperature("TG0D") ?? cpuTemp   // no RTX reading: as hot as the CPU, on the safe side
+        let curve = config.fan.curve
+        func wanted(_ temp: Int, _ now: Int?) -> Int? {
+            let rising = curvePercent(curve, temp: temp)
+            guard let now else { return rising }
+            let falling = curvePercent(curve, temp: temp + 3) ?? GamingWMI.fanMinPercent
+            return (rising ?? 0) > now ? rising : min(now, falling)
+        }
+        let cpu = wanted(cpuTemp, curveSent?.cpu), gpu = wanted(gpuTemp, curveSent?.gpu)
+        do {
+            if curveSent != nil, cpuTemp + 3 < curve[0].temp, gpuTemp + 3 < curve[0].temp {
+                log("fan curve: CPU \(cpuTemp) C, RTX \(gpuTemp) C under the first point: Auto")
+                try setFanBehavior(ec, max: false)
+                curveSent = nil
+                fanOffAuto = false
+                readFirmware()
+            } else if let sent = curveSent {
+                let nextCPU = cpu ?? sent.cpu, nextGPU = gpu ?? sent.gpu
+                if nextCPU != sent.cpu { try setFanSpeed(ec, gpu: false, percent: nextCPU) }
+                if nextGPU != sent.gpu { try setFanSpeed(ec, gpu: true, percent: nextGPU) }
+                if nextCPU != sent.cpu || nextGPU != sent.gpu { log("fan curve: CPU \(cpuTemp) C \(nextCPU) %, RTX \(gpuTemp) C \(nextGPU) %") }
+                curveSent = (nextCPU, nextGPU)
+            } else if cpu != nil || gpu != nil {
+                // The other fan may be under the first point: both modes change together, so it takes the lowest duty there is.
+                let nextCPU = cpu ?? GamingWMI.fanMinPercent, nextGPU = gpu ?? GamingWMI.fanMinPercent
+                log("fan curve: CPU \(cpuTemp) C \(nextCPU) %, RTX \(gpuTemp) C \(nextGPU) %")
+                try setFanCustom(ec, cpu: nextCPU, gpu: nextGPU)
+                curveSent = (nextCPU, nextGPU)
+                fanOffAuto = true
+                readFirmware()
+            } else if fanOffAuto {
+                // Chosen, or back from a wake, under the first point.
+                try setFanBehavior(ec, max: false)
+                fanOffAuto = false
+                readFirmware()
+            }
+        } catch {
+            log("fan curve: \(error); back to Auto")
+            do { try setFanBehavior(ec, max: false) } catch { log("fans back to Auto: \(error)") }
+            curveSent = nil
+            fanOffAuto = false
+            config.userFan = "auto"
+            save()
+            readFirmware()
+        }
+    }
+
     private func checkFanLimits() {
         guard config.userFan == "custom", fanOffAuto else { hotTicks = 0; return }
         let cpu = (try? ec.dump())?[Reg.cpuTemp] ?? 0
-        let rtx = readRTXTelemetry().tempC ?? 0
+        let rtx = smc?.temperature("TG0D") ?? readRTXTelemetry().tempC ?? 0
         hotTicks = cpu >= 95 || rtx >= 87 ? hotTicks + 1 : 0
         guard hotTicks >= 3 else { return }
         log("fan: CPU \(cpu) C, RTX \(rtx) C with a manual duty: back to Auto")
@@ -287,6 +354,12 @@ final class Daemon {
         if let d = try? ec.dump() { reply["ec"] = d.map { Int($0) } }
         if let cpuPower, Date().timeIntervalSince(cpuPowerAt) < 6 { reply["cpuPower"] = cpuPower }
         if let igpuActive, Date().timeIntervalSince(igpuActiveAt) < 6 { reply["igpuActive"] = igpuActive }
+        if hasPCU, let pcu = pcuMeter.sample(ec) {
+            var d: [String: Any] = ["raw": pcu.raw.map { Int($0) }]
+            d["packageW"] = pcu.packageWatts; d["coreW"] = pcu.coreWatts; d["igpuW"] = pcu.igpuWatts
+            d["packageT"] = pcu.packageTemp; d["coreT"] = pcu.coreTemp; d["igpuT"] = pcu.igpuTemp
+            reply["pcu"] = d
+        }
         var control: [String: Any] = ["gamingWMI": gamingWMI, "batteryWMI": batteryWMI, "firmwareReadOK": config.firmwareReadOK]
         if let batteryLimit, let data = try? JSONEncoder().encode(batteryLimit), let obj = try? JSONSerialization.jsonObject(with: data) {
             control["batteryLimit"] = obj
@@ -312,14 +385,25 @@ final class Daemon {
             if Date().timeIntervalSince(lastFirmwareRead) >= minFirmwareReadInterval { readFirmware() }
             return statusReply()
         case "fan":
-            guard let mode = request["mode"] as? String, ["auto", "max", "custom"].contains(mode) else {
-                return ["ok": false, "error": "fan mode must be auto, max or custom"]
+            guard let mode = request["mode"] as? String, ["auto", "max", "custom", "curve"].contains(mode) else {
+                return ["ok": false, "error": "fan mode must be auto, max, custom or curve"]
             }
             let cpuDuty = request["cpu"] as? Int ?? config.userFanCPU, gpuDuty = request["gpu"] as? Int ?? config.userFanGPU
             guard gamingWMI else { return noGamingWMI() }
             guard answered({ $0.fanCPU != nil && $0.fanGPU != nil }) else { return notRead("fan behaviour") }
             guard commandAllowedNow() else { return tooSoon() }
             do {
+                if mode == "curve" {
+                    // Its first tick sets the fans, from whatever state they are in.
+                    config.userFan = mode
+                    curveSent = nil
+                    fanOffAuto = true
+                    hotTicks = 0
+                    save()
+                    log("fan: curve, asked by a client")
+                    checkFanCurve()
+                    return statusReply()
+                }
                 if mode == "custom" {
                     try setFanCustom(ec, cpu: cpuDuty, gpu: gpuDuty)
                     config.userFanCPU = cpuDuty
@@ -348,6 +432,22 @@ final class Daemon {
                 readFirmware()
                 return refused("fan \(mode): \(error)")
             }
+        case "fancurve":
+            guard let points = request["curve"] as? [[String: Int]] else {
+                return ["ok": false, "error": "fancurve takes a list of points"]
+            }
+            let curve = points.compactMap { p in p["temp"].flatMap { t in p["percent"].map { FanCurvePoint(temp: t, percent: $0) } } }
+            do {
+                guard curve.count == points.count else { throw NitroECError(description: "a point of the curve has no temperature or duty") }
+                try validateFanCurve(curve)
+            } catch {
+                return ["ok": false, "error": "\(error)"]
+            }
+            config.fan.curve = curve
+            save()
+            log("fan curve: \(curve.map { "\($0.temp) C \($0.percent) %" }.joined(separator: ", "))")
+            if config.userFan == "curve" { checkFanCurve() }
+            return statusReply()
         case "usb":
             guard let value = request["value"] as? Int, GamingWMI.usbChargeSet[value] != nil else {
                 return ["ok": false, "error": "USB charging takes 0, 10, 20 or 30"]

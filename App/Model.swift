@@ -38,6 +38,8 @@ struct Sample {
     let rtxLoad: Int?
     let rtxPower: Double?
     var igpuLoad: Int? = nil
+    var igpuTemp: Int? = nil
+    var igpuPower: Double? = nil
 }
 
 // What nitrod says about the firmware controls. Nothing here comes from a guess: until a reading exists, a control shows no
@@ -59,26 +61,26 @@ struct ControlState: Equatable {
 
     // Why a control is greyed out, when it is.
     var readBlockedReason: String? {
-        if daemonGone { return "nitrod is not reachable" }
-        if !daemonKnowsControls { return "needs the nitrod of this build" }
-        if !gamingWMI { return "needs the kext and SSDT of this build, then a reboot" }
+        if daemonGone { return L("nitrod is not reachable") }
+        if !daemonKnowsControls { return L("needs the nitrod of this build") }
+        if !gamingWMI { return L("needs the kext and SSDT of this build, then a reboot") }
         return nil
     }
 
     private func writeBlockedReason(_ can: Bool, _ what: String) -> String? {
         if let reason = readBlockedReason { return reason }
-        if firmware == nil { return "press Read firmware first" }
-        return can ? nil : "the firmware did not answer the \(what) read"
+        if firmware == nil { return L("press Read firmware first") }
+        return can ? nil : L(what == "fan" ? "the firmware did not answer the fan read" : "the firmware did not answer the mode read")
     }
 
     // The charge limit needs only what the battery-limit kext and SSDT already offer, so it does not wait for a reboot.
     var canSetBatteryLimit: Bool { daemonKnowsControls && batteryWMI && batteryLimit != nil }
 
     var batteryBlockedReason: String? {
-        if daemonGone { return "nitrod is not reachable" }
-        if !daemonKnowsControls { return "needs the nitrod of this build" }
-        if !batteryWMI { return "the loaded kext and SSDT offer no battery WMI" }
-        return batteryLimit == nil ? "not read yet" : nil
+        if daemonGone { return L("nitrod is not reachable") }
+        if !daemonKnowsControls { return L("needs the nitrod of this build") }
+        if !batteryWMI { return L("the loaded kext and SSDT offer no battery WMI") }
+        return batteryLimit == nil ? L("not read yet") : nil
     }
 
     var fanBlockedReason: String? { writeBlockedReason(canSetFan, "fan") }
@@ -133,6 +135,8 @@ final class NitroModel {
     var history: [Sample] = []   // last 5 min
     var cpuLoad: Int?
     var igpuLoad: Int?         // Iris Xe active %, from nitrod (powermetrics "GPU Active")
+    var igpuTemp: Int?         // Iris Xe plane, from the CPU's registers through nitrod
+    var igpuPower: Double?     // same, W from its energy counter
     var cpuPower: Double?      // CPU package W from nitrod (powermetrics)
     var batteryPower: Double?  // whole machine W while on battery
     var rtxLoad: Int?
@@ -197,7 +201,7 @@ final class NitroModel {
         guard rtxIsRecent, let gpc = rtx.gpcMHz else { return nil }
         return rtx.pstate.map { "\(gpc) MHz P\($0)" } ?? "\(gpc) MHz"
     }
-    var gpuProblem: String { rtx.problem ?? (rtxIsRecent ? "" : "not read yet") }
+    var gpuProblem: String { rtx.problem ?? (rtxIsRecent ? "" : L("not read yet")) }
 
     // The main window opened or the menu bar panel came up: fresh numbers now, if the last ones are older than the fast rate.
     func sampleRTXNow() { sampleRTX(olderThan: rtxFastInterval) }
@@ -216,6 +220,7 @@ final class NitroModel {
 
     // Both fans in the same state, as the firmware last answered; nil when not read yet or when they differ.
     var currentFan: String? {
+        if config.userFan == "curve" { return "curve" }   // the firmware says Auto or Custom, depending on the temperature
         guard let cpu = control.firmware?.fanCPU, let gpu = control.firmware?.fanGPU, cpu == gpu else { return nil }
         return cpu == 1 ? "auto" : cpu == 2 ? "max" : cpu == 3 ? "custom" : nil
     }
@@ -239,6 +244,10 @@ final class NitroModel {
 
     func setFanDuty(cpu: Int, gpu: Int) {
         send(["cmd": "fan", "mode": "custom", "cpu": cpu, "gpu": gpu], isStatus: false, isWrite: true, asksFirmware: true)
+    }
+
+    func setFanCurve(_ curve: [FanCurvePoint]) {
+        send(["cmd": "fancurve", "curve": curve.map { ["temp": $0.temp, "percent": $0.percent] }], isStatus: false, isWrite: true)
     }
 
     func setUSBCharge(_ value: Int) { send(["cmd": "usb", "value": value], isStatus: false, isWrite: true) }
@@ -323,7 +332,7 @@ final class NitroModel {
         }
         if reply["control"] == nil { applyControl(nil) }
         if asksFirmware, reply["warning"] == nil, let errors = control.firmware?.errors, !errors.isEmpty {
-            showAction("Firmware: \(errors.joined(separator: "; "))", warning: true)
+            showAction(L("Firmware: %@", errors.joined(separator: "; ")), warning: true)
         }
         if let ec = (reply["ec"] as? [Int])?.map({ UInt8(truncatingIfNeeded: $0) }), ec.count == 256 {
             snapshot = Snapshot(ec)
@@ -331,9 +340,12 @@ final class NitroModel {
                 cpuLoad = loadMeter.sample() ?? cpuLoad
                 cpuPower = reply["cpuPower"] as? Double
                 igpuLoad = (reply["igpuActive"] as? Double).map { Int($0.rounded()) }
+                let pcu = reply["pcu"] as? [String: Any]
+                igpuTemp = pcu?["igpuT"] as? Int
+                igpuPower = pcu?["igpuW"] as? Double
                 batteryPower = batteryDischargeWatts()
                 history.append(Sample(date: Date(), cpuTemp: snapshot.cpuTemp, gpuTemp: gpuTemp, cpuLoad: cpuLoad, cpuPower: cpuPower,
-                                      rtxLoad: rtxLoad, rtxPower: gpuPower))
+                                      rtxLoad: rtxLoad, rtxPower: gpuPower, igpuLoad: igpuLoad, igpuTemp: igpuTemp, igpuPower: igpuPower))
                 if history.count > 150 { history.removeFirst(history.count - 150) }
             }
         } else if isStatus {

@@ -1,5 +1,4 @@
-// Overlay dialogs: the fan curve editor, which nothing opens on this branch (a manual duty is set with the sliders of the main
-// window).
+// Overlay dialogs: the fan curve editor.
 
 import SwiftUI
 
@@ -11,7 +10,7 @@ struct DialogFrame<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(NS.text)
+                Text(L(title)).font(.system(size: 14, weight: .medium)).foregroundStyle(NS.text)
                 Spacer()
                 Button(action: close) {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .light)).foregroundStyle(Color(white: 0.75))
@@ -48,17 +47,18 @@ struct CurvePanel: View {
     var body: some View {
         let fan = model.config.fan
         DialogFrame(title: "Fan Curve", close: close) {
-            Text("Used when Fan Control is set to Curve. Fan speed (%) by temperature (°C); fans go to max at \(fan.failsafeTemp) °C regardless.")
+            Text("Used when Fan Control is set to Curve. The CPU fan follows the CPU temperature, the GPU fan the RTX one. Under the first point the firmware's Auto runs, quieter than any manual duty.")
                 .font(.system(size: 11)).foregroundStyle(NS.dim)
+                .fixedSize(horizontal: false, vertical: true)
             HStack(alignment: .top, spacing: 14) {
-                CurveGraph(curve: curve, cpuTemp: model.snapshot.cpuTemp, gpuTemp: fan.curveGPU ? model.gpuTemp : nil)
+                CurveGraph(curve: curve, cpuTemp: model.snapshot.cpuTemp, gpuTemp: model.gpuTemp)
                     .frame(height: 220)
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(curve.indices, id: \.self) { i in
                         HStack(spacing: 6) {
                             StepField(text: "\(curve[i].temp)°", minus: { curve[i].temp = max(30, curve[i].temp - 1) },
                                       plus: { curve[i].temp = min(100, curve[i].temp + 1) })
-                            StepField(text: "\(curve[i].percent)%", minus: { curve[i].percent = max(20, curve[i].percent - 5) },
+                            StepField(text: "\(curve[i].percent)%", minus: { curve[i].percent = max(GamingWMI.fanMinPercent, curve[i].percent - 5) },
                                       plus: { curve[i].percent = min(100, curve[i].percent + 5) })
                             Button { curve.remove(at: i) } label: {
                                 Image(systemName: "xmark").font(.system(size: 10)).foregroundStyle(curve.count > 2 ? NS.dim : NS.faint)
@@ -81,11 +81,6 @@ struct CurvePanel: View {
                 Text(error).font(.system(size: 11)).foregroundStyle(NS.red)
             }
             HStack {
-                SettingRow(label: "Also drive the GPU fan", isOn: fan.curveGPU) {
-                    model.config.fan.curveGPU = $0
-                }
-                .frame(width: 250)
-                Text("(off: GPU fan stays on Auto, quieter)").font(.system(size: 11)).foregroundStyle(NS.dim)
                 Spacer()
                 NSButton(label: "Revert") { curve = fan.curve }
                 NSButton(label: "Save", icon: "checkmark") { save() }
@@ -95,14 +90,13 @@ struct CurvePanel: View {
     }
 
     private func save() {
-        var test = model.config
-        test.fan.curve = curve
         do {
-            try test.validate()
+            try validateFanCurve(curve)
             error = nil
-            model.config.fan.curve = curve
+            model.setFanCurve(curve)
+            close()
         } catch {
-            self.error = "\(error)"
+            self.error = L("\(error)")
         }
     }
 }
@@ -153,6 +147,7 @@ struct CurveGraph: View {
     let curve: [FanCurvePoint]
     let cpuTemp: Int
     let gpuTemp: Int?
+    var compact = false   // the small one in the main window: fewer axis labels
 
     var body: some View {
         Canvas { ctx, size in
@@ -166,7 +161,9 @@ struct CurveGraph: View {
                 let x = pt(t, 0).x
                 ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: plot.minY)); $0.addLine(to: CGPoint(x: x, y: plot.maxY)) },
                            with: .color(NS.red.opacity(0.12)), lineWidth: 1)
-                ctx.draw(Text("\(t)°").font(.system(size: 9)).foregroundStyle(NS.dim), at: CGPoint(x: x, y: plot.maxY + 10))
+                if !compact || (t - 30) % 20 == 10 {
+                    ctx.draw(Text("\(t)°").font(.system(size: 9)).foregroundStyle(NS.dim), at: CGPoint(x: x, y: plot.maxY + 10))
+                }
             }
             for p in stride(from: 0, through: 100, by: 25) {
                 let y = pt(30, p).y
@@ -174,14 +171,15 @@ struct CurveGraph: View {
                            with: .color(Color(white: 0.17)), lineWidth: 1)
                 ctx.draw(Text("\(p)%").font(.system(size: 9)).foregroundStyle(NS.dim), at: CGPoint(x: pad / 2, y: y))
             }
-            func marker(_ t: Int, _ label: String, _ color: Color) {
+            // One above the other: the two temperatures are often close.
+            func marker(_ t: Int, _ label: String, _ color: Color, row: CGFloat) {
                 let x = pt(min(max(t, 30), 100), 0).x
                 ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: plot.minY)); $0.addLine(to: CGPoint(x: x, y: plot.maxY)) },
                            with: .color(color), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                ctx.draw(Text(label).font(.system(size: 9)).foregroundStyle(color), at: CGPoint(x: x + 4, y: plot.minY + 8), anchor: .leading)
+                ctx.draw(Text(label).font(.system(size: 9)).foregroundStyle(color), at: CGPoint(x: x + 4, y: plot.minY + 8 + row * 11), anchor: .leading)
             }
-            marker(cpuTemp, "CPU \(cpuTemp)°", NS.orange)
-            if let gpuTemp { marker(gpuTemp, "GPU \(gpuTemp)°", .purple) }
+            marker(cpuTemp, "CPU \(cpuTemp)°", NS.orange, row: 0)
+            if let gpuTemp { marker(gpuTemp, "GPU \(gpuTemp)°", .purple, row: 1) }
             guard curve.count > 1 else { return }
             var line = Path()
             line.move(to: CGPoint(x: plot.minX, y: pt(30, curve[0].percent).y))

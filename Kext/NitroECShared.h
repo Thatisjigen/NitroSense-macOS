@@ -8,6 +8,7 @@
 #define kNitroECWMBHInSize    16
 #define kNitroECWMBHOutSize   16
 #define kNitroECModeStateSize 44
+#define kNitroECPCUSize       32
 
 enum NitroECSelector {
     kNitroECSelReadByte = 0,  // in: scalar[0] = offset       out: scalar[0] = value
@@ -21,6 +22,8 @@ enum NitroECSelector {
                               // read only, no SMI, no root (needs an SSDT-NITRO with RMOD)
     kNitroECSelSetMode  = 6,  // in: scalar[0] = the index _Q30 switches on, 1..3. root only (needs an SSDT-NITRO with SMOD)
     kNitroECSelWMAA     = 7,  // same shape as WMBH, for the Apge WMI (WMAA). root only, exact whitelist
+    kNitroECSelPCU      = 8,  // out: struct[32] = the CPU's energy counters and temperatures, read only, no SMI, no root
+                              // (needs an SSDT-NITRO with RPCU)
     kNitroECSelCount
 };
 

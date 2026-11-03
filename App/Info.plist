@@ -6,6 +6,8 @@
     <key>CFBundleExecutable</key><string>NitroSense</string>
     <key>CFBundleIdentifier</key><string>com.nitrosense.app</string>
     <key>CFBundleName</key><string>NitroSense</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key><array><string>en</string><string>it</string></array>
     <key>CFBundleDisplayName</key><string>NitroSense</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.1.0</string>

@@ -32,6 +32,9 @@
  * to SetGamingMiscSetting and GetGamingMiscSetting 0x0B. The one write here to a byte the EC shares. The route is nghiant03's
  * for Linuwu-Sense on the same model (0xFE708607 + _Q30): https://github.com/0x7375646F/Linuwu-Sense/pull/147
  *
+ * RPCU is a plain read of the CPU's PCU registers, the block the DSDT itself maps as CPWR (GMHB + 0x5000; PL1 and PL2 are there):
+ * the energy counters and temperatures of the package and its two planes. The secondary plane is the Iris Xe.
+ *
  * RMOD is a plain read of the firmware fields behind the power modes (the regions ERM4, ERM6 and EMBX of the DSDT, used
  * by its _Q30): no SMI, no write. It tells what each mode is set to do on this board without needing Windows.
  */
@@ -41,6 +44,7 @@ DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
     External (_SB_.PC00.WMID.WMBE, MethodObj)    // 3 Arguments
     External (_SB_.PC00.WMID.WMBH, MethodObj)    // 3 Arguments
     External (_SB_.PC00.LPCB.EC0._Q30, MethodObj)    // 0 Arguments
+    External (_SB_.PC00.GMHB, MethodObj)    // 0 Arguments
 
     Scope (\_SB)
     {
@@ -124,6 +128,54 @@ DefinitionBlock ("", "SSDT", 2, "NITRO", "NITROEC", 0x00001000)
                 RHDR [One] = BCOL /* \_SB_.NTRO.BCOL */
                 RHDR [0x02] = BIDP /* \_SB_.NTRO.BIDP */
                 Return (Concatenate (RHDR, BUF4))
+            }
+
+            // PCU registers: Buffer (0x20) = primary plane energy, secondary plane energy, units, package energy, GT_PERF_STATUS,
+            // package, primary plane and secondary plane temperature. All zero where the method cannot read them.
+            Method (RPCU, 0, Serialized)
+            {
+                Name (RBUF, Buffer (0x20) {})
+                If (_OSI ("Darwin"))
+                {
+                    If (CondRefOf (\_SB.PC00.GMHB))
+                    {
+                        OperationRegion (PCUR, SystemMemory, (\_SB.PC00.GMHB () + 0x5900), 0x0100)
+                        Field (PCUR, DWordAcc, NoLock, Preserve)
+                        {
+                            Offset (0x28),
+                            ENP0,   32,
+                            ENP1,   32,
+                            Offset (0x38),
+                            UNIT,   32,
+                            ENPK,   32,
+                            Offset (0x48),
+                            GTPS,   32,
+                            Offset (0x78),
+                            TPKG,   32,
+                            TPP0,   32,
+                            TPP1,   32
+                        }
+
+                        CreateDWordField (RBUF, Zero, R000)
+                        CreateDWordField (RBUF, 0x04, R004)
+                        CreateDWordField (RBUF, 0x08, R008)
+                        CreateDWordField (RBUF, 0x0C, R00C)
+                        CreateDWordField (RBUF, 0x10, R010)
+                        CreateDWordField (RBUF, 0x14, R014)
+                        CreateDWordField (RBUF, 0x18, R018)
+                        CreateDWordField (RBUF, 0x1C, R01C)
+                        R000 = ENP0 /* ENP0 */
+                        R004 = ENP1 /* ENP1 */
+                        R008 = UNIT /* UNIT */
+                        R00C = ENPK /* ENPK */
+                        R010 = GTPS /* GTPS */
+                        R014 = TPKG /* TPKG */
+                        R018 = TPP0 /* TPP0 */
+                        R01C = TPP1 /* TPP1 */
+                    }
+                }
+
+                Return (RBUF) /* RBUF */
             }
 
             // Power mode: Arg0 is the index _Q30 switches on, 1 performance, 2 balance, 3 quiet. _Q30 sets CCOL, PL1 and PL2 in the

@@ -19,6 +19,7 @@ class NitroEC : public IOService {
     bool hasRMOD {false};   // ... RMOD (same)
     bool hasSMOD {false};   // ... SMOD (same)
     bool hasWMAX {false};   // ... WMAX (same)
+    bool hasRPCU {false};   // ... RPCU (same)
     bool fanLeftOffAuto {false};  // a call through this kext took the fans off Auto and none brought them back yet
 
 public:
@@ -29,6 +30,7 @@ public:
     IOReturn readByte(uint32_t offset, uint8_t *value);
     IOReturn dump(uint8_t *buffer, uint32_t length);
     IOReturn modeState(uint8_t *buffer, uint32_t length);
+    IOReturn pcu(uint8_t *buffer, uint32_t length);
     IOReturn setMode(uint32_t index);
     IOReturn writeByte(uint32_t offset, uint32_t value);
     IOReturn callWMBH(uint32_t opcode, const uint8_t *in, uint8_t *out, uint32_t *outLength);
@@ -55,6 +57,7 @@ class NitroECUserClient : public IOUserClient {
     static IOReturn sReadByte(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sDump(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sModeState(OSObject *target, void *ref, IOExternalMethodArguments *args);
+    static IOReturn sPCU(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sSetMode(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWriteByte(OSObject *target, void *ref, IOExternalMethodArguments *args);
     static IOReturn sWMBH(OSObject *target, void *ref, IOExternalMethodArguments *args);
