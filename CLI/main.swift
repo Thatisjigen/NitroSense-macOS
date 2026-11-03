@@ -161,7 +161,8 @@ do {
         if args[1] == "status" {
             printPowerMode(ec, "Power mode")
         } else if let value = powerModes[args[1]] {
-            _ = try readMiscSetting(ec, GamingWMI.miscPlatformProfile)  // reads first, as for the fans
+            // No read first: on the ANV15-52 GetGamingMiscSetting answers status 1, which says nothing about the SET (WMBH runs
+            // EC0.HIDB after its SMI, and older Linux read this from EC 0x54 and wrote it through this method). FANT tells.
             printPowerMode(ec, "Before")
             let failure = attempt("SetGamingMiscSetting 0x0B \(hex(value)) (\(profileName(value)))") { try setPlatformProfile(ec, value) }
             Thread.sleep(forTimeInterval: 0.5)
