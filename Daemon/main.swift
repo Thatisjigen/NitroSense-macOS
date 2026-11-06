@@ -30,6 +30,15 @@ import IOKit.pwr_mgt
 let minFirmwareReadInterval = 3.0
 let minFirmwareCommandInterval = 1.0
 
+// The daemon's state (config, EC access, firmware readings, the fan watchdog)
+// is only ever touched on this one serial queue, so it needs no locks. Each
+// client connection is read on a separate concurrent queue under a hard total
+// deadline, so a slow or stuck client can never block the queue that drives the
+// temperature watchdog.
+let controlQueue = DispatchQueue(label: "com.nitrosense.nitrod.control")
+let connectionQueue = DispatchQueue(label: "com.nitrosense.nitrod.connection", attributes: .concurrent)
+let clientDeadline = 2.0
+
 func log(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
     FileHandle.standardError.write("\(stamp) nitrod: \(message)\n".data(using: .utf8)!)
@@ -67,18 +76,18 @@ final class PowerMeter {
                 if line.hasPrefix("GPU Active:") {
                     let value = line.dropFirst("GPU Active:".count).trimmingCharacters(in: .whitespaces)
                     if let percent = Double(value.replacingOccurrences(of: "%", with: "")) {
-                        DispatchQueue.main.async { self.onGPUActive(percent) }
+                        controlQueue.async { self.onGPUActive(percent) }
                     }
                     continue
                 }
                 guard line.hasPrefix("Intel energy model derived package power"),
                       let value = line.split(separator: ":").last.map({ $0.trimmingCharacters(in: .whitespaces) }),
                       let watts = Double(value.replacingOccurrences(of: "W", with: "")) else { continue }
-                DispatchQueue.main.async { self.onSample(watts) }
+                controlQueue.async { self.onSample(watts) }
             }
         }
         p.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            controlQueue.asyncAfter(deadline: .now() + 10) {
                 guard let self, !self.stopped else { return }
                 log("powermetrics exited, restarting")
                 self.start()
@@ -121,6 +130,8 @@ final class Daemon {
     var igpuActiveAt = Date.distantPast
     let pcuMeter = PCUMeter()
     lazy var hasPCU = nitroECOffers("NitroEC PCU")
+    var pcuSnapshot: PCUSample?         // last PCU reading, refreshed at the daemon's own rate, not the client's
+    var pcuSnapshotAt = Date.distantPast
     var curveSent: (cpu: Int, gpu: Int)?  // the duties the curve last sent; nil while the firmware's Auto runs
     let smc = SMCReader()
     lazy var powerMeter = PowerMeter(onSample: { [weak self] watts in
@@ -239,7 +250,7 @@ final class Daemon {
 
     // With a manual duty the EC no longer decides the fans. Over these limits for three samples in a row they go back to Auto.
     func startFanWatch() {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
+        let timer = DispatchSource.makeTimerSource(queue: controlQueue)
         timer.schedule(deadline: .now() + 5, repeating: 5)
         timer.setEventHandler { [weak self] in
             self?.checkFanLimits()
@@ -356,11 +367,20 @@ final class Daemon {
         if let d = try? ec.dump() { reply["ec"] = d.map { Int($0) } }
         if let cpuPower, Date().timeIntervalSince(cpuPowerAt) < 6 { reply["cpuPower"] = cpuPower }
         if let igpuActive, Date().timeIntervalSince(igpuActiveAt) < 6 { reply["igpuActive"] = igpuActive }
-        if hasPCU, let pcu = pcuMeter.sample(ec) {
-            var d: [String: Any] = ["raw": pcu.raw.map { Int($0) }]
-            d["packageW"] = pcu.packageWatts; d["coreW"] = pcu.coreWatts; d["igpuW"] = pcu.igpuWatts
-            d["packageT"] = pcu.packageTemp; d["coreT"] = pcu.coreTemp; d["igpuT"] = pcu.igpuTemp
-            reply["pcu"] = d
+        if hasPCU {
+            // Sample at the daemon's own rate, not the client's: the raw energy
+            // counters are a power side channel, so a fast-polling client must
+            // not get finer-grained readings than one per second.
+            if pcuSnapshot == nil || Date().timeIntervalSince(pcuSnapshotAt) >= 1.0 {
+                pcuSnapshot = pcuMeter.sample(ec)
+                pcuSnapshotAt = Date()
+            }
+            if let pcu = pcuSnapshot {
+                var d: [String: Any] = ["raw": pcu.raw.map { Int($0) }]
+                d["packageW"] = pcu.packageWatts; d["coreW"] = pcu.coreWatts; d["igpuW"] = pcu.igpuWatts
+                d["packageT"] = pcu.packageTemp; d["coreT"] = pcu.coreTemp; d["igpuT"] = pcu.igpuTemp
+                reply["pcu"] = d
+            }
         }
         var control: [String: Any] = ["gamingWMI": gamingWMI, "batteryWMI": batteryWMI, "firmwareReadOK": config.firmwareReadOK]
         if let batteryLimit, let data = try? JSONEncoder().encode(batteryLimit), let obj = try? JSONSerialization.jsonObject(with: data) {
@@ -591,18 +611,29 @@ final class Daemon {
 
 func serveClient(_ fd: Int32, _ daemon: Daemon) {
     defer { close(fd) }
-    var timeout = timeval(tv_sec: 2, tv_usec: 0)
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    // Read the whole request under one total deadline. A per-read timeout alone
+    // lets a client dribble a byte just before each timeout and hold the
+    // connection open for hours; the wall-clock deadline caps the whole
+    // exchange, so a stuck client can only ever tie up its own connection
+    // thread, never the control queue or the temperature watchdog.
+    let deadline = Date().addingTimeInterval(clientDeadline)
     var data = Data()
     var chunk = [UInt8](repeating: 0, count: 4096)
     while data.count < 65536, !data.contains(0x0A) {
+        let remaining = deadline.timeIntervalSinceNow
+        if remaining <= 0 { break }
+        let usTotal = max(1, Int(remaining * 1_000_000))
+        var timeout = timeval(tv_sec: usTotal / 1_000_000, tv_usec: Int32(usTotal % 1_000_000))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         let n = read(fd, &chunk, chunk.count)
         if n <= 0 { break }
         data.append(contentsOf: chunk[0..<n])
     }
     let reply: [String: Any]
     if let req = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        reply = daemon.handle(req)
+        // Run the request on the daemon's serial queue, where all EC and config
+        // state lives; the watchdog keeps ticking there while this thread waits.
+        reply = controlQueue.sync { daemon.handle(req) }
     } else {
         reply = ["ok": false, "error": "request must be one JSON object"]
     }
@@ -628,10 +659,10 @@ func startServer(_ daemon: Daemon) -> DispatchSourceRead? {
     }
     chown(nitrodSocketPath, 0, 80)  // gid 80 = admin
     chmod(nitrodSocketPath, 0o660)
-    let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
+    let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: controlQueue)
     source.setEventHandler {
         let client = accept(fd, nil, nil)
-        if client >= 0 { serveClient(client, daemon) }
+        if client >= 0 { connectionQueue.async { serveClient(client, daemon) } }
     }
     source.resume()
     return source
@@ -654,7 +685,7 @@ func registerPower(_ daemon: Daemon) {
         case msgCanSystemSleep, msgSystemWillSleep:
             IOAllowPowerChange(rootPort, Int(bitPattern: argument))
         case msgSystemHasPoweredOn:
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { daemon.applyAll(reason: "wake") }
+            controlQueue.asyncAfter(deadline: .now() + 3) { daemon.applyAll(reason: "wake") }
         default:
             break
         }
@@ -663,7 +694,7 @@ func registerPower(_ daemon: Daemon) {
         log("IORegisterForSystemPower failed; no re-apply on wake")
         return
     }
-    IONotificationPortSetDispatchQueue(port, .main)
+    IONotificationPortSetDispatchQueue(port, controlQueue)
 }
 
 // MARK: - main
@@ -679,7 +710,7 @@ while ec == nil {
 }
 
 let daemon = Daemon(ec: ec!)
-daemon.applyAll(reason: "start")
+controlQueue.sync { daemon.applyAll(reason: "start") }
 daemon.startFanWatch()
 daemon.powerMeter.start()
 let server = startServer(daemon)
@@ -691,7 +722,7 @@ signal(SIGPIPE, SIG_IGN)
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGTERM, SIGINT, SIGHUP] {
     signal(sig, SIG_IGN)
-    let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: controlQueue)
     source.setEventHandler {
         if sig == SIGHUP { daemon.applyAll(reason: "SIGHUP") } else { daemon.shutdown() }
     }
