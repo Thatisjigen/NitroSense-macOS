@@ -424,6 +424,11 @@ IOReturn NitroECUserClient::sModeState(OSObject *target, void *, IOExternalMetho
 
 IOReturn NitroECUserClient::sPCU(OSObject *target, void *, IOExternalMethodArguments *args) {
     auto self = static_cast<NitroECUserClient *>(target);
+    // Reading the CPU energy counters is an admin-only operation: at a high
+    // sampling rate they are a power side channel (PLATYPUS), so an unprivileged
+    // process must not be able to poll them.
+    if (!self->isAdmin)
+        return kIOReturnNotPrivileged;
     if (args->structureOutputSize < kNitroECPCUSize)
         return kIOReturnBadArgument;
     return self->owner->pcu(static_cast<uint8_t *>(args->structureOutput), kNitroECPCUSize);
