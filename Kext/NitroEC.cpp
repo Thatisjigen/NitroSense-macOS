@@ -2,6 +2,8 @@
 #include "NitroECShared.h"
 
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
+#include <libkern/OSAtomic.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 
@@ -399,8 +401,36 @@ IOReturn NitroECUserClient::externalMethod(uint32_t selector, IOExternalMethodAr
                                         this, nullptr);
 }
 
+// Any process may read the EC (a byte, the dump, the mode state), and every read takes the lock shared with the
+// firmware's ACPI methods, for about 2 ms on this board. Unprivileged clients share one budget: 8 reads at once, then
+// one every 10 ms. A tool that reads the dump and the mode state back to back never reaches it, nor does the app's
+// once-a-second poll, and the daemon is root; a tight loop from an unprivileged process can no longer keep the EC
+// lock busy.
+static const UInt64 kUnprivilegedReadInterval = 10000000ULL;   // ns
+static const UInt64 kUnprivilegedReadBurst = 8;
+static volatile UInt64 gUnprivilegedReadDue;   // uptime, ns: when the budget is whole again
+
+static bool unprivilegedReadAllowed(bool isAdmin) {
+    if (isAdmin)
+        return true;
+    uint64_t abs, now;
+    clock_get_uptime(&abs);
+    absolutetime_to_nanoseconds(abs, &now);
+    for (;;) {
+        // Each read granted moves the due time one interval on; a read is refused once that is a whole burst ahead.
+        const UInt64 due = gUnprivilegedReadDue;
+        const UInt64 base = due > now ? due : now;
+        if (base - now > (kUnprivilegedReadBurst - 1) * kUnprivilegedReadInterval)
+            return false;
+        if (OSCompareAndSwap64(due, base + kUnprivilegedReadInterval, &gUnprivilegedReadDue))
+            return true;
+    }
+}
+
 IOReturn NitroECUserClient::sReadByte(OSObject *target, void *, IOExternalMethodArguments *args) {
     auto self = static_cast<NitroECUserClient *>(target);
+    if (!unprivilegedReadAllowed(self->isAdmin))
+        return kIOReturnBusy;
     uint8_t value = 0;
     IOReturn ret = self->owner->readByte(static_cast<uint32_t>(args->scalarInput[0]), &value);
     if (ret == kIOReturnSuccess)
@@ -410,6 +440,8 @@ IOReturn NitroECUserClient::sReadByte(OSObject *target, void *, IOExternalMethod
 
 IOReturn NitroECUserClient::sDump(OSObject *target, void *, IOExternalMethodArguments *args) {
     auto self = static_cast<NitroECUserClient *>(target);
+    if (!unprivilegedReadAllowed(self->isAdmin))
+        return kIOReturnBusy;
     if (args->structureOutputSize < kNitroECDumpSize)
         return kIOReturnBadArgument;
     return self->owner->dump(static_cast<uint8_t *>(args->structureOutput), kNitroECDumpSize);
@@ -417,6 +449,8 @@ IOReturn NitroECUserClient::sDump(OSObject *target, void *, IOExternalMethodArgu
 
 IOReturn NitroECUserClient::sModeState(OSObject *target, void *, IOExternalMethodArguments *args) {
     auto self = static_cast<NitroECUserClient *>(target);
+    if (!unprivilegedReadAllowed(self->isAdmin))
+        return kIOReturnBusy;
     if (args->structureOutputSize < kNitroECModeStateSize)
         return kIOReturnBadArgument;
     return self->owner->modeState(static_cast<uint8_t *>(args->structureOutput), kNitroECModeStateSize);
