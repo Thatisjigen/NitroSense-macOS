@@ -37,8 +37,9 @@ $(KEXT)/Contents/Info.plist: Kext/Info.plist
 	@mkdir -p $(dir $@)
 	cp $< $@
 
-# Core/rusd.c reads the RTX telemetry through RM's structures: headers only, NVIDIA's open-gpu-kernel-modules at the version
-# the driver runs (NullMoth 2.6.6 = 615.78.08). rusd.c checks that version at run time. To get them:
+# Core/rusd.c reads the RTX telemetry through RM's structures: headers only, NVIDIA's open-gpu-kernel-modules. What rusd.c
+# uses is laid out the same in 615.78.08 (NullMoth up to 2.7) and 620.70.06 (NullMoth 2.8), so either tree builds the same
+# reader; rusd.c pins that layout at build time and checks the driver's version at run time. To get the headers:
 #   git clone --depth 1 --branch 615.78.08 --filter=blob:none --sparse https://github.com/NVIDIA/open-gpu-kernel-modules.git $(OPEN_GPU)
 #   git -C $(OPEN_GPU) sparse-checkout set src/common/sdk/nvidia/inc src/nvidia/arch/nvalloc/unix/include src/common/inc
 OPEN_GPU ?= open-gpu-615.78.08

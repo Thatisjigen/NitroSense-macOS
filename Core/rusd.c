@@ -5,8 +5,10 @@
 // this machine with nobody else polling: setup 5 ms; the values are there as soon as the allocation returns;
 // with the object alive RM polls at 0.1 s, then every 0.5 s, for as long as it lives; after the free the timestamps go back
 // to 0 and nothing moves. So a sample costs one poll, and between samples RM does not poll at all, which a long-lived object
-// would make it do. The structures come from NVIDIA's open-gpu-kernel-modules 615.78.08, the RM our NVRM runs; if the driver
-// reports another version nothing is read, because the page layout may differ.
+// would make it do. The structures come from NVIDIA's open-gpu-kernel-modules. Everything this file sends or reads has the
+// same sizes, offsets and constants in 615.78.08 (NullMoth up to 2.7) and 620.70.06 (NullMoth 2.8): a table of them was
+// compiled against each header tree and the two outputs are identical. The assertions below pin that layout at build time,
+// and at run time nothing is read if the driver reports any other version, because the page layout may differ.
 //
 // The transport (the user client and its escapes) comes from src/rm.c of https://github.com/Thatisjigen/nvenc:
 //
@@ -33,6 +35,7 @@
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -50,7 +53,22 @@
 #include "class/cl00de.h"
 #include "ctrl/ctrl0000/ctrl0000gpu.h"
 
-#define RM_HEADERS_VERSION "615.78.08"
+// The RM versions whose layout is the one pinned below. Add one only after comparing, against its headers, every structure
+// and constant this file uses: a field that moved would be read as a plausible wrong number.
+static const char *const kKnownRM[] = { "615.78.08", "620.70.06" };
+#define KNOWN_RM_TEXT "615.78.08 or 620.70.06"
+
+_Static_assert(sizeof(NV00DE_SHARED_DATA) == 3184 && offsetof(NV00DE_SHARED_DATA, clkPublicDomainInfos) == 72 &&
+               offsetof(NV00DE_SHARED_DATA, perfCurrentPstate) == 2280 && offsetof(NV00DE_SHARED_DATA, temperatures) == 2312 &&
+               offsetof(NV00DE_SHARED_DATA, avgPowerUsage) == 2472 && offsetof(NV00DE_SHARED_DATA, instPowerUsage) == 2496,
+               "RM's shared data page is not laid out as in the versions kKnownRM lists");
+_Static_assert(sizeof(RUSD_TEMPERATURE) == 16 && sizeof(RUSD_INST_POWER_USAGE) == 24 && sizeof(RUSD_AVG_POWER_USAGE) == 24 &&
+               sizeof(RUSD_CLK_PUBLIC_DOMAIN_INFOS) == 40 && sizeof(RUSD_PERF_CURRENT_PSTATE) == 16,
+               "a section of RM's shared data page is not laid out as in the versions kKnownRM lists");
+_Static_assert(sizeof(nv_ioctl_rm_api_version_t) == 72 && sizeof(nv_ioctl_card_info_t) == 72 && sizeof(NVOS21_PARAMETERS) == 32 &&
+               sizeof(NVOS54_PARAMETERS) == 32 && sizeof(NVOS33_PARAMETERS) == 48 && sizeof(NVOS34_PARAMETERS) == 32 &&
+               sizeof(NVOS00_PARAMETERS) == 16 && sizeof(NV0080_ALLOC_PARAMETERS) == 56 && sizeof(NV00DE_ALLOC_PARAMETERS) == 8,
+               "an RM call structure is not laid out as in the versions kKnownRM lists");
 
 enum { SEL_ESC = 1, SEL_BINDFD = 3 };
 enum { STEP_OK, STEP_CLIENT, STEP_QUERY, STEP_CARD, STEP_VERSION, STEP_ROOT, STEP_ID, STEP_DEVICE, STEP_SUBDEVICE, STEP_ALLOC, STEP_MAP, STEP_EMPTY };
@@ -61,7 +79,7 @@ const char *nitroRUSDStepName(int32_t step) {
     case STEP_CLIENT: return "no NVAccel user client: is the RTX driver up?";
     case STEP_QUERY: return "the driver did not answer: is the RTX up?";
     case STEP_CARD: return "the driver reports no card";
-    case STEP_VERSION: return "the driver's RM is not " RM_HEADERS_VERSION ": this build does not know its page layout";
+    case STEP_VERSION: return "the driver's RM is not " KNOWN_RM_TEXT ": this build does not know its page layout";
     case STEP_ROOT: return "no RM client";
     case STEP_ID: return "no GPU id";
     case STEP_DEVICE: return "no RM device";
@@ -129,7 +147,10 @@ void nitroRUSDSample(NitroRUSDSample *out) {
     memset(&version, 0, sizeof version);
     version.cmd = NV_RM_API_VERSION_CMD_QUERY;
     if (esc(&ctl, NV_ESC_CHECK_VERSION_STR, &version, sizeof version)) FAIL(STEP_QUERY, 0);
-    if (strncmp(version.versionString, RM_HEADERS_VERSION, sizeof version.versionString)) FAIL(STEP_VERSION, 0);
+    bool known = false;
+    for (size_t i = 0; i < sizeof kKnownRM / sizeof *kKnownRM; i++)
+        if (!strncmp(version.versionString, kKnownRM[i], sizeof version.versionString)) known = true;
+    if (!known) FAIL(STEP_VERSION, 0);
 
     nv_ioctl_card_info_t card;
     memset(&card, 0, sizeof card);
